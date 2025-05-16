@@ -3910,23 +3910,23 @@ static void initServerThread(struct redisServerThreadVars *pvar, int fMain)
 }
 
 void initServer(void) {
-    signal(SIGHUP, SIG_IGN);
-    signal(SIGPIPE, SIG_IGN);
-    setupSignalHandlers();
-    makeThreadKillable();
+    signal(SIGHUP, SIG_IGN);// 忽略SIGHUP信号
+    signal(SIGPIPE, SIG_IGN);// 忽略SIGPIPE信号（防止在写入到已关闭连接时服务器崩溃）
+    setupSignalHandlers();// 设置其它信号处理器
+    makeThreadKillable(); // 确保线程可以被干净地终止
 
     zfree(g_pserver->db);   // initServerConfig created a dummy array, free that now
-    g_pserver->db = (redisDb**)zmalloc(sizeof(redisDb*)*cserver.dbnum, MALLOC_LOCAL);
+    g_pserver->db = (redisDb**)zmalloc(sizeof(redisDb*)*cserver.dbnum, MALLOC_LOCAL);// 为每个数据库分配内存并初始化
 
     /* Create the Redis databases, and initialize other internal state. */
-    if (g_pserver->m_pstorageFactory == nullptr) {
-        for (int j = 0; j < cserver.dbnum; j++) {
+    if (g_pserver->m_pstorageFactory == nullptr) { // 根据是否配置了存储工厂来创建不同类型的数据库
+        for (int j = 0; j < cserver.dbnum; j++) {    // 纯内存模式
             g_pserver->db[j] = new (MALLOC_LOCAL) redisDb();
             g_pserver->db[j]->initialize(j);
         }
-    } else {
+    } else {    // 带持久化存储的模式
         // Read FLASH metadata and load the appropriate storage dbid into each databse index, as each DB index can have different storage dbid mapped due to the swapdb command.
-        g_pserver->metadataDb = g_pserver->m_pstorageFactory->createMetadataDb();
+        g_pserver->metadataDb = g_pserver->m_pstorageFactory->createMetadataDb();    // 从元数据中恢复数据库映射关系
         for (int idb = 0; idb < cserver.dbnum; ++idb)
         {
             int storage_dbid = idb;
@@ -3944,7 +3944,7 @@ void initServer(void) {
     {
         g_pserver->rgthreadvar[i].rgdbSnapshot = (const redisDbPersistentDataSnapshot**)zcalloc(sizeof(redisDbPersistentDataSnapshot*)*cserver.dbnum, MALLOC_LOCAL);
         serverAssert(g_pserver->rgthreadvar[i].rgdbSnapshot != nullptr);
-    }
+    }// 模块线程也需要数据库快照
     g_pserver->modulethreadvar.rgdbSnapshot = (const redisDbPersistentDataSnapshot**)zcalloc(sizeof(redisDbPersistentDataSnapshot*)*cserver.dbnum, MALLOC_LOCAL);
     serverAssert(g_pserver->modulethreadvar.rgdbSnapshot != nullptr);
 
@@ -3962,14 +3962,14 @@ void initServer(void) {
             selectDb(mi->cached_master, 0);
     }
 
-    g_pserver->aof_state = g_pserver->aof_enabled ? AOF_ON : AOF_OFF;
-    g_pserver->hz = g_pserver->config_hz;
-    cserver.pid = getpid();
+    g_pserver->aof_state = g_pserver->aof_enabled ? AOF_ON : AOF_OFF;// AOF状态
+    g_pserver->hz = g_pserver->config_hz;// 设置服务器时钟频率
+    cserver.pid = getpid();// 记录进程ID
     g_pserver->in_fork_child = CHILD_TYPE_NONE;
     cserver.main_thread_id = pthread_self();
-    g_pserver->errors = raxNew();
-    g_pserver->clients_index = raxNew();
-    g_pserver->clients_to_close = listCreate();
+    g_pserver->errors = raxNew();// 错误追踪
+    g_pserver->clients_index = raxNew();// 客户端索引
+    g_pserver->clients_to_close = listCreate();// 待关闭客户端列表
     g_pserver->replicaseldb = -1; /* Force to emit the first SELECT command. */
     g_pserver->ready_keys = listCreate();
     g_pserver->clients_waiting_acks = listCreate();
@@ -3990,15 +3990,15 @@ void initServer(void) {
         exit(1);
     }
 
-    createSharedObjects();
-    adjustOpenFilesLimit();
-    const char *clk_msg = monotonicInit();
+    createSharedObjects();// 创建共享对象（如常用回复）
+    adjustOpenFilesLimit();// 调整文件描述符限制
+    const char *clk_msg = monotonicInit();// 初始化单调时钟
     serverLog(LL_NOTICE, "monotonic clock: %s", clk_msg);
 
-    evictionPoolAlloc(); /* Initialize the LRU keys pool. */
-    g_pserver->pubsub_channels = dictCreate(&keylistDictType,NULL);
-    g_pserver->pubsub_patterns = dictCreate(&keylistDictType,NULL);
-    g_pserver->cronloops = 0;
+    evictionPoolAlloc(); /* Initialize the LRU keys pool. */ // 初始化LRU驱逐池
+    g_pserver->pubsub_channels = dictCreate(&keylistDictType,NULL);// 发布/订阅频道
+    g_pserver->pubsub_patterns = dictCreate(&keylistDictType,NULL);// 发布/订阅模式
+    g_pserver->cronloops = 0;// 初始化众多统计计数器
     g_pserver->child_pid = -1;
     g_pserver->child_type = CHILD_TYPE_NONE;
     g_pserver->rdbThreadVars.fRdbThreadCancel = false;
@@ -4050,14 +4050,14 @@ void initServer(void) {
 
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
-     * expired keys and so forth. */
+     * expired keys and so forth. */// 创建服务器周期性任务的定时器（处理超时、过期键等）
     if (aeCreateTimeEvent(g_pserver->rgthreadvar[IDX_EVENT_LOOP_MAIN].el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
         exit(1);
     }
 
     /* Open the AOF file if needed. */
-    if (g_pserver->aof_state == AOF_ON) {
+    if (g_pserver->aof_state == AOF_ON) { //如果启用了AOF，打开AOF文件：
         g_pserver->aof_fd = open(g_pserver->aof_filename,
                                O_WRONLY|O_APPEND|O_CREAT,0644);
         if (g_pserver->aof_fd == -1) {
@@ -4071,21 +4071,21 @@ void initServer(void) {
      * no explicit limit in the user provided configuration we set a limit
      * at 3 GB using maxmemory with 'noeviction' policy'. This avoids
      * useless crashes of the Redis instance for out of memory. */
-    if (sizeof(void*) == 4 && g_pserver->maxmemory == 0) {
+    if (sizeof(void*) == 4 && g_pserver->maxmemory == 0) { //对32位系统进行内存限制保护：设置3GB的默认限制以避免OOM
         serverLog(LL_WARNING,"Warning: 32 bit instance detected but no memory limit set. Setting 3 GB maxmemory limit with 'noeviction' policy now.");
         g_pserver->maxmemory = 3072LL*(1024*1024); /* 3 GB */
         g_pserver->maxmemory_policy = MAXMEMORY_NO_EVICTION;
     }
 
-    /* Generate UUID */
+    /* Generate UUID */// 生成服务器唯一ID
     static_assert(sizeof(uuid_t) == sizeof(cserver.uuid), "UUIDs are standardized at 16-bytes");
     uuid_generate((unsigned char*)cserver.uuid);
 
-    if (g_pserver->cluster_enabled) clusterInit();
-    replicationScriptCacheInit();
-    scriptingInit(1);
-    slowlogInit();
-    latencyMonitorInit();
+    if (g_pserver->cluster_enabled) clusterInit();// 集群初始化
+    replicationScriptCacheInit();// 复制脚本缓存初始化
+    scriptingInit(1);// Lua脚本引擎初始化
+    slowlogInit();// 慢查询日志初始化
+    latencyMonitorInit();// 延迟监控初始化
 
     if (g_pserver->m_pstorageFactory) {
         if (g_pserver->metadataDb) {
@@ -4139,14 +4139,14 @@ void InitServerLast() {
     /* We have to initialize storage providers after the cluster has been initialized */
     moduleFireServerEvent(REDISMODULE_EVENT_LOADING, REDISMODULE_SUBEVENT_LOADING_FLASH_START, NULL);
     for (int idb = 0; idb < cserver.dbnum; ++idb)
-    {
+    {   // 存储提供器初始化
         g_pserver->db[idb]->storageProviderInitialize();
     }
     moduleFireServerEvent(REDISMODULE_EVENT_LOADING, REDISMODULE_SUBEVENT_LOADING_ENDED, NULL);
 
-    bioInit();
-    set_jemalloc_bg_thread(cserver.jemalloc_bg_thread);
-    g_pserver->initial_memory_usage = zmalloc_used_memory();
+    bioInit();// 后台I/O子系统初始化
+    set_jemalloc_bg_thread(cserver.jemalloc_bg_thread);// 内存分配器后台线程设置
+    g_pserver->initial_memory_usage = zmalloc_used_memory();// 异步工作队列创建
 
     g_pserver->asyncworkqueue = new (MALLOC_LOCAL) AsyncWorkQueue(cserver.cthreads);
 
