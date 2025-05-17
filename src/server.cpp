@@ -7260,31 +7260,63 @@ int redisIsSupervised(int mode) {
     return ret;
 }
 
+/**
+ * @brief 获取MVCC时间戳的原子读取操作
+ *
+ * 该函数通过原子加载指令安全地读取全局服务器实例的MVCC时间戳值，
+ * 确保在并发访问时的内存可见性与操作顺序。
+ *
+ * @param 无
+ * @return uint64_t 返回原子加载的MVCC时间戳值
+ */
 uint64_t getMvccTstamp()
 {
     uint64_t rval;
+
+    // 使用原子加载指令读取mvcc_tstamp值，采用ACQUIRE内存序：
+    // 1. 保证加载操作不会被重排序到当前指令之后
+    // 2. 建立内存同步屏障，确保后续操作能看到其他线程通过RELEASE内存序发布的变更
     __atomic_load(&g_pserver->mvcc_tstamp, &rval, __ATOMIC_ACQUIRE);
+
     return rval;
 }
 
+
+/**
+ * @brief 增量更新MVCC时间戳，确保其不低于当前系统时间戳
+ *
+ * 该函数通过原子操作维护MVCC时间戳的单调递增性，用于解决多版本并发控制中的
+ * 时间戳同步问题。当检测到MVCC时间戳落后于当前系统时间时，会将其提升到当
+ * 前时间；当检测到时间戳溢出或超前时，会进行安全的递增操作。
+ *
+ * @param 无
+ * @return 无
+ */
 void incrementMvccTstamp()
 {
     uint64_t msPrev;
+    // 原子加载当前MVCC时间戳并转换为毫秒单位
     __atomic_load(&g_pserver->mvcc_tstamp, &msPrev, __ATOMIC_ACQUIRE);
     msPrev >>= MVCC_MS_SHIFT;  // convert to milliseconds
 
+    // 原子加载当前系统时间戳
     long long mst;
     __atomic_load(&g_pserver->mstime, &mst, __ATOMIC_ACQUIRE);
-    if (msPrev >= (uint64_t)mst)  // we can be greater if the count overflows
+
+    // 比较时间戳并执行相应更新策略
+    if (msPrev >= (uint64_t)mst)  // 处理时间戳溢出或超前情况
     {
+        // 安全递增MVCC时间戳
         __atomic_fetch_add(&g_pserver->mvcc_tstamp, 1, __ATOMIC_RELEASE);
     }
-    else
+    else  // 正常时间推进情况
     {
+        // 将系统时间转换为MVCC时间戳格式并更新
         uint64_t val = ((uint64_t)mst) << MVCC_MS_SHIFT;
         __atomic_store(&g_pserver->mvcc_tstamp, &val, __ATOMIC_RELEASE);
     }
 }
+
 
 void OnTerminate()
 {
@@ -7328,17 +7360,35 @@ void wakeTimeThread() {
     serverAssert(sleeping_threads >= 0);
 }
 
+/**
+ * @brief 管理时间更新的线程主循环
+ *
+ * 该线程负责周期性更新时间缓存，协调休眠线程唤醒机制，
+ * 并通过条件变量实现线程状态同步。
+ *
+ * @param arg 保留参数（未使用）
+ * @return void* 线程退出状态（始终为NULL）
+ */
 void *timeThreadMain(void*) {
     timespec delay;
     delay.tv_sec = 0;
     delay.tv_nsec = 100;
     int cycle_count = 0;
     aeThreadOnline();
+
     while (true) {
         {
+            // 进入临界区前切换到离线状态
             aeThreadOffline();
             std::unique_lock<fastlock> lock(time_thread_lock);
+            // 获取锁后切换到在线状态
             aeThreadOnline();
+            /**
+             * 当所有线程都处于休眠状态时：
+             * 1. 切换到离线状态
+             * 2. 等待条件变量唤醒
+             * 3. 唤醒后重置循环计数器
+             */
             if (sleeping_threads >= cserver.cthreads) {
                 aeThreadOffline();
                 time_thread_cv.wait(lock);
@@ -7346,12 +7396,21 @@ void *timeThreadMain(void*) {
                 cycle_count = 0;
             }
         }
+
+        // 更新全局时间缓存
         updateCachedTime();
+        /**
+         * 达到最大循环次数时：
+         * 1. 切换到离线状态释放资源
+         * 2. 立即恢复在线状态
+         * 3. 重置循环计数器
+         */
         if (cycle_count == MAX_CYCLES_TO_HOLD_FORK_LOCK) {
             aeThreadOffline();
             aeThreadOnline();
             cycle_count = 0;
         }
+        // 根据平台选择高精度休眠方式
 #if defined(__APPLE__)
         nanosleep(&delay, nullptr);
 #else
@@ -7359,6 +7418,7 @@ void *timeThreadMain(void*) {
 #endif
         cycle_count++;
     }
+    // 线程退出前切换到离线状态
     aeThreadOffline();
 }
 

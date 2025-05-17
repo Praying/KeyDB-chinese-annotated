@@ -1104,48 +1104,105 @@ public:
 };
 
 class redisDbPersistentDataSnapshot;
+/**
+ * @brief 类redisDbPersistentData用于管理Redis数据库的持久化数据。
+ * 提供键值对存储、快照管理、内存优化及线程安全的数据操作功能。
+ * 通过protected继承限制进一步派生类的访问。
+ */
 class redisDbPersistentData
 {
     friend void dictDbKeyDestructor(void *privdata, void *key);
     friend class redisDbPersistentDataSnapshot;
 
 public:
+    /**
+     * @brief 构造函数，初始化持久化数据结构
+     */
     redisDbPersistentData();
+
+    /**
+     * @brief 析构函数，释放资源
+     */
     virtual ~redisDbPersistentData();
 
+    // 禁止拷贝和移动构造
     redisDbPersistentData(const redisDbPersistentData &) = delete;
     redisDbPersistentData(redisDbPersistentData &&) = delete;
 
+    /**
+     * @brief 获取哈希表槽位数量
+     * @return 返回当前哈希表的槽位数
+     */
     size_t slots() const { return dictSlots(m_pdict); }
+
+    /**
+     * @brief 获取数据库元素数量
+     * @param fCachedOnly 是否仅统计缓存数据
+     * @return 返回数据库中键值对的数量
+     */
     size_t size(bool fCachedOnly = false) const;
+
+    /**
+     * @brief 扩展哈希表容量
+     * @param slots 新的槽位数量
+     */
     void expand(uint64_t slots) {
         if (m_spstorage)
             m_spstorage->expand(slots);
         else
-            dictExpand(m_pdict, slots); 
+            dictExpand(m_pdict, slots);
     }
-    
+
+    /**
+     * @brief 跟踪键的使用情况（带对象参数）
+     * @param o 键对象
+     * @param fUpdate 是否为更新操作
+     */
     void trackkey(robj_roptr o, bool fUpdate)
     {
         trackkey(szFromObj(o), fUpdate);
     }
 
+    /**
+     * @brief 跟踪键的使用情况（带字符串参数）
+     * @param key 键名称
+     * @param fUpdate 是否为更新操作
+     */
     void trackkey(const char *key, bool fUpdate);
 
-    dict_iter find(const char *key) 
+    /**
+     * @brief 查找指定键的迭代器
+     * @param key 键名称
+     * @return 返回指向该键的迭代器
+     */
+    dict_iter find(const char *key)
     {
         dictEntry *de = dictFind(m_pdict, key);
         ensure(key, &de);
         return dict_iter(m_pdict, de);
     }
 
+    /**
+     * @brief 通过对象查找键（重载版本）
+     * @param key 键对象
+     * @return 返回对应的迭代器
+     */
     dict_iter find(robj_roptr key)
     {
         return find(szFromObj(key));
     }
 
+    /**
+     * @brief 获取随机键的迭代器
+     * @return 返回随机键的迭代器
+     */
     dict_iter random();
 
+    /**
+     * @brief 获取随机过期键的信息
+     * @param key 输出参数，返回随机过期键的名称
+     * @return 返回过期条目指针或nullptr
+     */
     const expireEntry *random_expire(sds *key)
     {
         auto itr = random();
@@ -1156,126 +1213,423 @@ public:
         return nullptr;
     }
 
+    /**
+     * @brief 获取空迭代器（非const版本）
+     * @return 返回空迭代器
+     */
     dict_iter end()  { return dict_iter(nullptr, nullptr); }
+
+    /**
+     * @brief 获取空迭代器（const版本）
+     * @return 返回const类型的空迭代器
+     */
     dict_const_iter end() const { return dict_const_iter(nullptr); }
 
+    /**
+     * @brief 获取统计信息字符串
+     * @param buf 输出缓冲区
+     * @param bufsize 缓冲区大小
+     */
     void getStats(char *buf, size_t bufsize) { dictGetStats(buf, bufsize, m_pdict); }
 
+    /**
+     * @brief 插入或更新键值对
+     * @param k 键名称
+     * @param o 值对象
+     * @param fAssumeNew 是否假设为新键
+     * @param existing 输出参数，返回已存在的条目
+     * @return 插入/更新是否成功
+     */
     bool insert(char *k, robj *o, bool fAssumeNew = false, dict_iter *existing = nullptr);
+
+    /**
+     * @brief 尝试调整哈希表大小
+     */
     void tryResize();
+
+    /**
+     * @brief 增量式重新哈希
+     * @return 返回处理的条目数
+     */
     int incrementallyRehash();
+
+    /**
+     * @brief 更新键的值
+     * @param itr 迭代器位置
+     * @param val 新值对象
+     */
     void updateValue(dict_iter itr, robj *val);
+
+    /**
+     * @brief 同步删除键
+     * @param key 键对象
+     * @return 删除是否成功
+     */
     bool syncDelete(robj *key);
+
+    /**
+     * @brief 异步删除键
+     * @param key 键对象
+     * @return 删除是否成功
+     */
     bool asyncDelete(robj *key);
+
+    /**
+     * @brief 获取过期条目数量
+     * @return 返回过期条目数
+     */
     size_t expireSize() const { return m_numexpires; }
+
+    /**
+     * @brief 移除键的过期时间
+     * @param key 键对象
+     * @param itr 迭代器位置
+     * @return 移除是否成功
+     */
     int removeExpire(robj *key, dict_iter itr);
+
+    /**
+     * @brief 移除子键的过期时间
+     * @param key 主键对象
+     * @param subkey 子键对象
+     * @return 移除是否成功
+     */
     int removeSubkeyExpire(robj *key, robj *subkey);
+
+    /**
+     * @brief 清空数据库
+     * @param callback 清理时的回调函数
+     */
     void clear(void(callback)(void*));
+
+    /**
+     * @brief 异步清空数据库
+     */
     void emptyDbAsync();
-    // Note: If you do not need the obj then use the objless iterator version.  It's faster
+
+    /**
+     * @brief 遍历数据库键值对
+     * @param fn 回调函数，处理每个键值对
+     * @return 遍历是否完成
+     */
     bool iterate(std::function<bool(const char*, robj*)> fn);
+
+    /**
+     * @brief 设置键的过期时间
+     * @param key 键对象
+     * @param subkey 子键对象（可选）
+     * @param when 过期时间戳
+     */
     void setExpire(robj *key, robj *subkey, long long when);
+
+    /**
+     * @brief 设置键的过期条目（移动语义）
+     * @param key 键名称
+     * @param e 过期条目对象
+     */
     void setExpire(const char *key, expireEntry &&e);
+
+    /**
+     * @brief 初始化数据库结构
+     */
     void initialize();
+
+    /**
+     * @brief 准备在快照模式下覆盖指定键的数据时，标记墓碑条目
+     * @param key 需要处理的键名
+     */
     void prepOverwriteForSnapshot(char *key);
 
+    /**
+     * @brief 检查是否正在进行哈希表重哈希
+     * @return 返回布尔值
+     */
     bool FRehashing() const { return dictIsRehashing(m_pdict) || dictIsRehashing(m_pdictTombstone); }
 
+    /**
+     * @brief 设置存储提供者
+     * @param pstorage 存储缓存指针
+     */
     void setStorageProvider(StorageCache *pstorage);
+
+    /**
+     * @brief 结束存储提供者
+     */
     void endStorageProvider();
 
+    /**
+     * @brief 开启变更跟踪
+     * @param fBulk 是否批量操作
+     * @param sizeHint 预分配大小提示
+     */
     void trackChanges(bool fBulk, size_t sizeHint = 0);
+
+    /**
+     * @brief 检查是否正在跟踪变更
+     * @return 返回跟踪状态
+     */
     bool FTrackingChanges() const { return !!m_fTrackingChanges; }
 
-    // Process and commit changes for secondary storage.  Note that process and commit are seperated
-    //  to allow you to release the global lock before commiting.  To prevent deadlocks you *must*
-    //  either release the global lock or keep the same global lock between the two functions as
-    //  a second look is kept to ensure writes to secondary storage are ordered
+    /**
+     * @brief 处理二级存储变更（分阶段提交）
+     * @param fSnapshot 是否关联快照
+     * @return 返回处理结果
+     */
     bool processChanges(bool fSnapshot);
+
+    /**
+     * @brief 异步处理变更
+     * @param pendingJobs 待处理任务计数器
+     */
     void processChangesAsync(std::atomic<int> &pendingJobs);
+
+    /**
+     * @brief 提交变更到持久化存储
+     * @param psnapshotFree 可选快照释放列表
+     */
     void commitChanges(const redisDbPersistentDataSnapshot **psnapshotFree = nullptr);
 
-    // This should only be used if you look at the key, we do not fixup
-    //  objects stored elsewhere
-    dict *dictUnsafeKeyOnly() { return m_pdict; }   
+    /**
+     * @brief 获取原始键字典（仅限键操作）
+     * @return 返回键字典指针
+     */
+    dict *dictUnsafeKeyOnly() { return m_pdict; }
 
+    /**
+     * @brief 创建数据库快照
+     * @param mvccCheckpoint MVCC检查点标识
+     * @param fOptional 是否可选快照
+     * @return 返回快照指针
+     */
     const redisDbPersistentDataSnapshot *createSnapshot(uint64_t mvccCheckpoint, bool fOptional);
+
+    /**
+     * @brief 结束指定快照
+     * @param psnapshot 快照指针
+     */
     void endSnapshot(const redisDbPersistentDataSnapshot *psnapshot);
+
+    /**
+     * @brief 异步结束快照
+     * @param psnapshot 快照指针
+     */
     void endSnapshotAsync(const redisDbPersistentDataSnapshot *psnapshot);
+
+    /**
+     * @brief 恢复指定快照
+     * @param psnapshot 快照指针
+     */
     void restoreSnapshot(const redisDbPersistentDataSnapshot *psnapshot);
 
+    /**
+     * @brief 检查是否存在存储提供者
+     * @return 返回存在状态
+     */
     bool FStorageProvider() { return m_spstorage != nullptr; }
+
+    /**
+     * @brief 移除缓存中的键值
+     * @param key 键名
+     * @param ppde 输出参数，返回被移除的字典条目
+     * @return 返回移除是否成功
+     */
     bool removeCachedValue(const char *key, dictEntry **ppde = nullptr);
+
+    /**
+     * @brief 移除所有缓存值
+     */
     void removeAllCachedValues();
+
+    /**
+     * @brief 禁用键缓存
+     */
     void disableKeyCache();
+
+    /**
+     * @brief 检查键缓存是否启用
+     * @return 返回启用状态
+     */
     bool keycacheIsEnabled();
 
+    /**
+     * @brief 异步预取指定键
+     * @param c 客户端指针
+     * @param command 解析后的命令
+     */
     void prefetchKeysAsync(client *c, struct parsed_command &command);
 
+    /**
+     * @brief 检查是否存在快照
+     * @return 返回快照存在状态
+     */
     bool FSnapshot() const { return m_spdbSnapshotHOLDER != nullptr; }
 
+    /**
+     * @brief 克隆存储缓存
+     * @return 返回克隆的存储缓存指针
+     */
     std::unique_ptr<const StorageCache> CloneStorageCache() { return std::unique_ptr<const StorageCache>(m_spstorage->clone()); }
+
+    /**
+     * @brief 获取存储缓存共享指针
+     * @return 返回存储缓存智能指针
+     */
     std::shared_ptr<StorageCache> getStorageCache() { return m_spstorage; }
+
+    /**
+     * @brief 批量直接插入存储
+     * @param rgKeys 键数组
+     * @param rgcbKeys 键长度数组
+     * @param rgVals 值数组
+     * @param rgcbVals 值长度数组
+     * @param celem 元素数量
+     */
     void bulkDirectStorageInsert(char **rgKeys, size_t *rgcbKeys, char **rgVals, size_t *rgcbVals, size_t celem);
 
+    /**
+     * @brief 线程安全地查找缓存键
+     * @param key 键名
+     * @return 返回找到的迭代器
+     */
     dict_iter find_cached_threadsafe(const char *key) const;
 
+    /**
+     * @brief 活动过期周期核心实现
+     * @param type 过期类型
+     */
     static void activeExpireCycleCore(int type);
 
 protected:
-    uint64_t m_mvccCheckpoint = 0;
+    uint64_t m_mvccCheckpoint = 0;  ///< MVCC检查点标识
 
 private:
+    /**
+     * @brief 序列化并存储变更
+     * @param storage 存储缓存指针
+     * @param db 数据库指针
+     * @param key 键名
+     * @param fUpdate 是否为更新操作
+     */
     static void serializeAndStoreChange(StorageCache *storage, redisDbPersistentData *db, const char *key, bool fUpdate);
 
+    /**
+     * @brief 确保键存在（无参数重载）
+     * @param key 键名
+     */
     void ensure(const char *key);
+
+    /**
+     * @brief 确保键存在（带输出参数）
+     * @param key 键名
+     * @param de 输出参数，返回字典条目
+     */
     void ensure(const char *key, dictEntry **de);
+
+    /**
+     * @brief 存储整个数据库
+     */
     void storeDatabase();
+
+    /**
+     * @brief 存储单个键值对
+     * @param key 键对象
+     * @param o 值对象
+     * @param fOverwrite 是否覆盖
+     */
     void storeKey(sds key, robj *o, bool fOverwrite);
+
+    /**
+     * @brief 递归释放快照
+     * @param psnapshot 快照指针
+     */
     void recursiveFreeSnapshots(redisDbPersistentDataSnapshot *psnapshot);
 
-    // Keyspace
-    dict *m_pdict = nullptr;                 /* The keyspace for this DB */
-    dict *m_pdictTombstone = nullptr;        /* Track deletes when we have a snapshot */
-    std::atomic<int> m_fTrackingChanges {0};     // Note: Stack based
+    // 键空间相关成员
+    dict *m_pdict = nullptr;                 ///< 主键空间字典
+    dict *m_pdictTombstone = nullptr;         ///< 快照模式下的墓碑字典
+    std::atomic<int> m_fTrackingChanges {0};  ///< 变更跟踪标志
     std::atomic<int> m_fAllChanged {0};
-    dict *m_dictChanged = nullptr;
-    size_t m_cnewKeysPending = 0;
-    std::shared_ptr<StorageCache> m_spstorage = nullptr;
+    dict *m_dictChanged = nullptr;             ///< 变更记录字典
+    size_t m_cnewKeysPending = 0;             ///< 待处理的新键数量
+    std::shared_ptr<StorageCache> m_spstorage;///< 存储缓存智能指针
 
-    // Expire
-    size_t m_numexpires = 0;
+    // 过期管理相关
+    size_t m_numexpires = 0;  ///< 当前过期条目数
 
-    // These two pointers are the same, UNLESS the database has been cleared.
-    //      in which case m_pdbSnapshot is NULL and we continue as though we weren'
-    //      in a snapshot
-    const redisDbPersistentDataSnapshot *m_pdbSnapshot = nullptr;
-    std::unique_ptr<redisDbPersistentDataSnapshot> m_spdbSnapshotHOLDER;
-    const redisDbPersistentDataSnapshot *m_pdbSnapshotASYNC = nullptr;
-    
+    // 快照相关指针
+    const redisDbPersistentDataSnapshot *m_pdbSnapshot = nullptr;          ///< 主快照指针
+    std::unique_ptr<redisDbPersistentDataSnapshot> m_spdbSnapshotHOLDER;   ///< 快照持有者智能指针
+    const redisDbPersistentDataSnapshot *m_pdbSnapshotASYNC = nullptr;     ///< 异步快照指针
+
     const redisDbPersistentDataSnapshot *m_pdbSnapshotStorageFlush = nullptr;
     dict *m_dictChangedStorageFlush = nullptr;
-    
-    int m_refCount = 0;
+
+    int m_refCount = 0;  ///< 引用计数
 };
 
+
+/**
+ * @brief 类redisDbPersistentDataSnapshot用于管理Redis数据库持久化数据的快照。
+ * 提供线程安全的数据迭代、快照生命周期管理及MVCC检查点功能。
+ * 继承自redisDbPersistentData，通过protected继承限制进一步派生类的访问。
+ */
 class redisDbPersistentDataSnapshot : protected redisDbPersistentData
 {
     friend class redisDbPersistentData;
 private:
+    /**
+     * @brief 核心线程安全迭代方法，遍历数据库中的键值对。
+     * @param fn 用户提供的回调函数，参数为键和对象指针，返回true继续迭代。
+     * @param fKeyOnly 若为true，则仅处理键，不处理值对象。
+     * @param fCacheOnly 若为true，则仅遍历缓存中的数据。
+     * @param fTop 若为true，则在顶层结构进行操作。
+     * @return 返回回调函数最终返回值，用于控制迭代是否继续。
+     */
     bool iterate_threadsafe_core(std::function<bool(const char*, robj_roptr o)> &fn, bool fKeyOnly, bool fCacheOnly, bool fTop) const;
 
 protected:
+    /**
+     * @brief 垃圾回收器用于释放指定快照对象的资源。
+     * @param psnapshot 需要释放的redisDbPersistentDataSnapshot实例指针。
+     */
     static void gcDisposeSnapshot(redisDbPersistentDataSnapshot *psnapshot);
+    /**
+     * @brief 清理墓碑标记的对象，释放其占用的资源。
+     * @param depth 清理深度，控制递归清理的层级。
+     * @return 若成功释放至少一个对象返回true，否则返回false。
+     */
     bool freeTombstoneObjects(int depth);
 
 public:
+    /**
+     * @brief 获取当前快照的深度值，用于标识快照的层级或版本。
+     * @return 返回快照深度整数值。
+     */
     int snapshot_depth() const;
+    /**
+     * @brief 调试用方法，检查当前实例是否会释放子对象。
+     * @return 若存在关联的快照持有者则返回true，表示将释放子对象。
+     */
     bool FWillFreeChildDebug() const { return m_spdbSnapshotHOLDER != nullptr; }
 
+    /**
+     * @brief 线程安全地遍历数据库中的键值对，封装核心迭代逻辑。
+     * @param fn 回调函数，接受键和对象指针，返回true继续迭代。
+     * @param fKeyOnly 可选参数，默认false，若为true则仅处理键。
+     * @param fCacheOnly 可选参数，默认false，若为true则仅遍历缓存数据。
+     * @return 返回迭代结果，由回调函数链式决定是否继续。
+     */
     bool iterate_threadsafe(std::function<bool(const char*, robj_roptr o)> fn, bool fKeyOnly = false, bool fCacheOnly = false) const;
+    /**
+     * @brief 线程安全扫描数据库中的键，按指定条件收集到列表中。
+     * @param iterator 起始迭代器位置。
+     * @param count 最大收集键数量。
+     * @param type 匹配的键类型过滤条件。
+     * @param keys 输出参数，存储结果键的列表。
+     * @return 返回下一次迭代的位置索引。
+     */
     unsigned long scan_threadsafe(unsigned long iterator, long count, sds type, list *keys) const;
-    
+
     using redisDbPersistentData::createSnapshot;
     using redisDbPersistentData::endSnapshot;
     using redisDbPersistentData::endSnapshotAsync;
@@ -1283,21 +1637,45 @@ public:
     using redisDbPersistentData::find_cached_threadsafe;
     using redisDbPersistentData::FSnapshot;
 
+    /**
+     * @brief 获取随机缓存项的迭代器，用于缓存抽样分析。
+     * @param fPrimaryOnly 若为true，则仅从主缓存中选取。
+     * @return 返回dict_iter类型的缓存迭代器。
+     */
     dict_iter random_cache_threadsafe(bool fPrimaryOnly = false) const;
 
     expireEntry *getExpire(robj_roptr key) { return getExpire(szFromObj(key)); }
+    /**
+     * @brief 获取指定键的过期条目（通过C字符串）。
+     * @param key 键的C字符串表示。
+     * @return 返回关联的expireEntry指针，若不存在则为nullptr。
+     */
     expireEntry *getExpire(const char *key);
+    /**
+     * @brief 获取指定键的过期条目（通过C字符串）的常量版本。
+     * @param key 键的C字符串表示。
+     * @return 返回关联的expireEntry常量指针，若不存在则为nullptr。
+     */
     const expireEntry *getExpire(const char *key) const;
     const expireEntry *getExpire(robj_roptr key) const { return getExpire(szFromObj(key)); }
 
+    /**
+     * @brief 获取当前MVCC检查点标识值，用于事务一致性控制。
+     * @return 返回64位无符号整型检查点值。
+     */
     uint64_t mvccCheckpoint() const { return m_mvccCheckpoint; }
 
+    /**
+     * @brief 检查当前快照是否已过时，可能需要更新或重建。
+     * @return 若快照过时返回true，否则返回false。
+     */
     bool FStale() const;
 
     // These need to be fixed
     using redisDbPersistentData::size;
     using redisDbPersistentData::expireSize;
 };
+
 
 /* Redis database representation. There are multiple databases identified
  * by integers from 0 (the default database) up to the max configured
@@ -2690,9 +3068,9 @@ struct redisServer {
     int fWriteDuringActiveLoad;                  /* Can this active-replica write during an RDB load? */
     int fEnableFastSync = false;
 
-    // Format:
-    //  Lower 20 bits: a counter incrementing for each command executed in the same millisecond
-    //  Upper 44 bits: mstime (least significant 44-bits) enough for ~500 years before rollover from date of addition
+    // 格式说明：
+    // 低20位：在同一毫秒内执行的命令计数器（每执行一条指令递增）
+    // 高44位：毫秒时间戳（取最低44位有效位），自添加之日起约500年内不会发生回绕
     uint64_t mvcc_tstamp;
 
     AsyncWorkQueue *asyncworkqueue;

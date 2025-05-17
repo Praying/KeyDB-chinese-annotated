@@ -868,6 +868,14 @@ int aeTryAcquireLock(int fWeak)
     return g_lock.try_lock(!!fWeak);
 }
 
+/**
+ * @brief 通知其他线程当前线程已离线，释放读锁资源。
+ *
+ * 该函数用于在当前线程结束时释放之前持有的读锁，允许其他等待的线程继续执行。
+ *
+ * @return 无
+ */
+
 void aeThreadOffline()
 {
     g_forkLock.releaseRead();

@@ -42,35 +42,53 @@
 /* Unused arguments generate annoying warnings... */
 #define DICT_NOTUSED(V) ((void) V)
 
+/*
+ * 哈希表节点结构
+ * 每个节点存储键值对及指向下一个节点的指针
+ */
 typedef struct dictEntry {
-    void *key;
-    void *val;
-    struct dictEntry *next;
+    void *key;      // 键指针
+    void *val;      // 值指针
+    struct dictEntry *next;  // 冲突链表指针
 } dictEntry;
 
+/*
+ * 字典类型操作函数族定义
+ * 包含哈希表所需的函数指针集合
+ */
 typedef struct dictType {
-    unsigned int (*hashFunction)(const void *key);
-    void *(*keyDup)(void *privdata, const void *key);
-    void *(*valDup)(void *privdata, const void *obj);
-    int (*keyCompare)(void *privdata, const void *key1, const void *key2);
-    void (*keyDestructor)(void *privdata, void *key);
-    void (*valDestructor)(void *privdata, void *obj);
+    unsigned int (*hashFunction)(const void *key);  // 哈希计算函数
+    void *(*keyDup)(void *privdata, const void *key);  // 键复制函数
+    void *(*valDup)(void *privdata, const void *obj);  // 值复制函数
+    int (*keyCompare)(void *privdata, const void *key1, const void *key2);  // 键比较函数
+    void (*keyDestructor)(void *privdata, void *key);  // 键销毁函数
+    void (*valDestructor)(void *privdata, void *obj);  // 值销毁函数
 } dictType;
 
+/*
+ * 哈希表核心结构
+ * 包含表数据及操作函数集合
+ */
 typedef struct dict {
-    dictEntry **table;
-    dictType *type;
-    unsigned long size;
-    unsigned long sizemask;
-    unsigned long used;
-    void *privdata;
+    dictEntry **table;      // 哈希表存储数组
+    dictType *type;         // 类型操作函数集合
+    unsigned long size;     // 表容量
+    unsigned long sizemask; // 容量掩码（用于快速取模）
+    unsigned long used;     // 已使用节点数
+    void *privdata;         // 私有数据指针
 } dict;
 
+/*
+ * 字典迭代器结构
+ * 用于安全遍历哈希表元素
+ */
 typedef struct dictIterator {
-    dict *ht;
-    int index;
-    dictEntry *entry, *nextEntry;
+    dict *ht;        // 关联的哈希表
+    int index;       // 当前桶索引
+    dictEntry *entry;   // 当前节点指针
+    dictEntry *nextEntry;  // 预取的下一个节点
 } dictIterator;
+
 
 /* This is the initial size of every hash table */
 #define DICT_HT_INITIAL_SIZE     4

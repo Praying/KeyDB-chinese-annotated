@@ -57,6 +57,19 @@ void slotToKeyUpdateKeyCore(const char *key, size_t keylen, int add);
 
 std::unique_ptr<expireEntry> deserializeExpire(const char *str, size_t cch, size_t *poffset);
 
+/*
+ * 定义字典类型操作函数集 dictChangeDescType，用于配置字典实例的特定行为。
+ * 该结构体适用于以 sds 类型作为键的字典实例，具体成员说明如下：
+ *
+ * hashFunction:    dictSdsHash - 使用 sds 键的哈希计算函数
+ * keyDup:          NULL        - 不执行键复制操作（直接使用原始指针）
+ * valDup:          NULL        - 不执行值复制操作（直接使用原始指针）
+ * keyCompare:      dictSdsKeyCompare - 使用 sds 专用的键比较函数
+ * keyDestructor:   dictSdsDestructor - 使用 sds 专用的键销毁函数
+ * valDestructor:   nullptr     - 不执行值销毁操作（不持有值的所有权）
+ *
+ * 注意：该配置假设字典值为裸指针且不需要内存管理，键需为 sds 类型。
+ */
 dictType dictChangeDescType {
     dictSdsHash,                /* hash function */
     NULL,                       /* key dup */
@@ -281,24 +294,45 @@ robj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
     return o;
 }
 
+
+/**
+ * 向Redis数据库核心结构中添加键值对
+ *
+ * 参数:
+ * db          - 目标数据库对象指针
+ * key         - 要插入的键（sds字符串）
+ * val         - 要插入的值（Redis对象）
+ * fUpdateMvcc - 是否更新MVCC时间戳
+ * fAssumeNew  - 是否假设键不存在（优化插入路径）
+ * piterExisting - 已存在的键迭代器（用于优化插入位置）
+ * fValExpires - 值是否带有过期标志
+ *
+ * 返回值:
+ * 成功插入返回true，键已存在返回false
+ *
+ * 注意: 该函数会接管val的引用计数所有权
+ */
 bool dbAddCore(redisDb *db, sds key, robj *val, bool fUpdateMvcc, bool fAssumeNew = false, dict_iter *piterExisting = nullptr, bool fValExpires = false) {
+    // 验证值对象的过期状态与参数一致性
     serverAssert(fValExpires || !val->FExpires());
+    // 创建键的副本（使用共享内存优化）
     sds copy = sdsdupshared(key);
-    
+    // 获取当前MVCC时间戳并按需更新值对象
     uint64_t mvcc = getMvccTstamp();
     if (fUpdateMvcc) {
         setMvccTstamp(val, mvcc);
     }
-
+    // 执行实际插入操作
     bool fInserted = db->insert(copy, val, fAssumeNew, piterExisting);
-
     if (fInserted)
     {
+        // 插入成功时触发键就绪信号并更新集群槽位映射
         signalKeyAsReady(db, key, val->type);
         if (g_pserver->cluster_enabled) slotToKeyAdd(key);
     }
     else
     {
+        // 插入失败时释放键副本内存
         sdsfree(copy);
     }
 
@@ -396,24 +430,38 @@ int dbMerge(redisDb *db, sds key, robj *val, int fReplace)
     }
 }
 
-/* High level Set operation. This function can be used in order to set
- * a key, whatever it was existing or not, to a new object.
+/* 高级的 Set 操作。此函数可用于设置新对象到指定键，无论该键是否已存在。
  *
- * 1) The ref count of the value object is incremented.
- * 2) clients WATCHing for the destination key notified.
- * 3) The expire time of the key is reset (the key is made persistent),
- *    unless 'keepttl' is true.
+ • 1) 值对象的引用计数会被增加。
+ • 2) 监视目标键的客户端会收到通知。
+ • 3) 除非 'keepttl' 参数为 true，否则键的过期时间将被重置（使键持久化）。
+
+ • 数据库中的所有新键都应通过此接口创建。
+ • 如果操作执行时没有明确的客户端上下文，客户端参数 'c' 可以设为 NULL。 */
+
+/**
+ * 通用的设置键值函数，用于在Redis数据库中设置或更新键的值
  *
- * All the new keys in the database should be created via this interface.
- * The client 'c' argument may be set to NULL if the operation is performed
- * in a context where there is no clear client performing the operation. */
+ * @param c 客户端指针，用于信号修改键时通知客户端
+ * @param db Redis数据库指针，表示要操作的数据库实例
+ * @param key 键对象指针，表示要设置或更新的键
+ * @param val 值对象指针，表示要关联到键的新值
+ * @param keepttl 保持生存时间标志，若为真，则保留键的生存时间；否则，根据新值更新生存时间
+ * @param signal 信号标志，若为真，则在键被修改时发送信号通知
+ */
 void genericSetKey(client *c, redisDb *db, robj *key, robj *val, int keepttl, int signal) {
+    // 准备键的覆盖操作，为快照保存做准备
     db->prepOverwriteForSnapshot(szFromObj(key));
+    // 初始化字典迭代器，用于可能的数据库操作
     dict_iter iter;
+    // 尝试在数据库中添加或更新键值对
+    // 如果添加/更新失败（即键已存在），则执行覆盖操作
     if (!dbAddCore(db, szFromObj(key), val, true /* fUpdateMvcc */, false /*fAssumeNew*/, &iter)) {
         dbOverwrite(db, key, val, !keepttl, &iter);
     }
+    // 增加值对象的引用计数，以确保其在数据库中的有效性
     incrRefCount(val);
+    // 如果信号标志为真，则在键被修改时发送信号通知
     if (signal) signalModifiedKey(c,db,key);
 }
 
@@ -2670,12 +2718,31 @@ void redisDb::storageProviderDelete()
     }
 }
 
+/**
+ * 将键值对插入Redis持久化数据库
+ *
+ * 参数说明：
+ * key           键的原始指针
+ * o             Redis对象指针，存储要插入的值
+ * fAssumeNew    假设标志位，true表示调用方认为该键不存在
+ * piterExisting 输出参数，当键已存在时返回对应的字典迭代器
+ *
+ * 返回值：
+ * 成功插入返回true（DICT_OK），键已存在或内存不足返回false
+ */
 bool redisDbPersistentData::insert(char *key, robj *o, bool fAssumeNew, dict_iter *piterExisting)
 {
+    // 非新键场景下需要进行持久化状态检查
+    // 当存在存储工厂或数据库快照时，确保持久化状态一致性
     if (!fAssumeNew && (g_pserver->m_pstorageFactory != nullptr || m_pdbSnapshot != nullptr))
         ensure(key);
+
     dictEntry *de;
+    // 尝试将键值对插入主字典
     int res = dictAdd(m_pdict, key, o, &de);
+
+    // 验证假设的新键状态是否符合预期
+    // 当fAssumeNew为true时，若插入结果不是DICT_OK则记录警告日志
     if (!FImplies(fAssumeNew, res == DICT_OK)) {
         serverLog(LL_WARNING,
             "Assumed new key %s existed in DB.", key);
@@ -2683,17 +2750,22 @@ bool redisDbPersistentData::insert(char *key, robj *o, bool fAssumeNew, dict_ite
     if (res == DICT_OK)
     {
 #ifdef CHECKED_BUILD
+        // 调试模式下验证快照与墓碑字典的一致性
+        // 如果快照中存在该键，必须确保持有对应的墓碑标记
         if (m_pdbSnapshot != nullptr && m_pdbSnapshot->find_cached_threadsafe(key) != nullptr)
         {
             serverAssert(dictFind(m_pdictTombstone, key) != nullptr);
         }
 #endif
+        // 更新过期键计数器
         if (o->FExpires())
             ++m_numexpires;
+        // 跟踪键的创建/更新状态
         trackkey(key, false /* fUpdate */);
     }
     else
     {
+        // 键已存在时设置输出迭代器
         if (piterExisting)
             *piterExisting = dict_iter(m_pdict, de);
     }
@@ -2701,17 +2773,32 @@ bool redisDbPersistentData::insert(char *key, robj *o, bool fAssumeNew, dict_ite
 }
 
 // This is a performance tool to prevent us copying over an object we're going to overwrite anyways
+/**
+ * @brief 准备在快照模式下覆盖指定键的数据时，标记墓碑条目
+ *
+ * 该函数用于在Redis持久化过程中，当需要覆盖现有键时，将旧键值标记为墓碑，
+ * 以保证快照的完整性。当前仅在非LFU内存策略下生效。
+ *
+ * @param key 需要处理的键名
+ * @return 无返回值
+ */
 void redisDbPersistentData::prepOverwriteForSnapshot(char *key)
 {
+    // 如果启用了LFU内存策略，则跳过墓碑标记处理
     if (g_pserver->maxmemory_policy & MAXMEMORY_FLAG_LFU)
         return;
 
+    // 处理快照模式下的墓碑标记
     if (m_pdbSnapshot != nullptr)
     {
+        // 在快照数据库中线程安全地查找键
         auto itr = m_pdbSnapshot->find_cached_threadsafe(key);
+        // 如果在快照中找到有效键
         if (itr.key() != nullptr)
         {
+            // 复制键值用于墓碑标记
             sds keyNew = sdsdupshared(itr.key());
+            // 尝试将键添加到墓碑字典，失败时立即释放内存
             if (dictAdd(m_pdictTombstone, keyNew, (void*)dictHashKey(m_pdict, key)) != DICT_OK)
                 sdsfree(keyNew);
         }

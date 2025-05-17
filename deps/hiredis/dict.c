@@ -71,11 +71,19 @@ static void _dictReset(dict *ht) {
 }
 
 /* Create a new hash table */
+/*
+ * 创建并初始化一个新的字典结构。
+ * 参数：
+ *   type: 指向字典类型的结构，定义了字典的操作函数。
+ *   privDataPtr: 私有数据指针，用于传递给字典操作函数的上下文。
+ * 返回值：
+ *   成功时返回指向新创建字典的指针，失败时返回NULL。
+ */
 static dict *dictCreate(dictType *type, void *privDataPtr) {
     dict *ht = hi_malloc(sizeof(*ht));
     if (ht == NULL)
         return NULL;
-
+     //初始化字典结构，绑定类型操作和私有数据。
     _dictInit(ht,type,privDataPtr);
     return ht;
 }

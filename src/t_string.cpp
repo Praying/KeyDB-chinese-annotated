@@ -79,28 +79,49 @@ static int checkStringLength(client *c, long long size, long long append) {
 #define OBJ_PXAT (1<<7)            /* Set if timestamp in ms is given */
 #define OBJ_PERSIST (1<<8)         /* Set if we need to remove the ttl */
 
-void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire, int unit, robj *ok_reply, robj *abort_reply) {
-    long long milliseconds = 0, when = 0; /* initialized to avoid any harmness warning */
 
+/**
+ * 设置通用命令函数。
+ *
+ * 该函数用于处理设置键值对的操作，支持多种选项，如过期时间、条件设置等。
+ *
+ * @param c 客户端指针，用于与客户端进行通信。
+ * @param flags 命令标志，用于指定不同的设置选项。
+ * @param key 键对象，表示要设置的键。
+ * @param val 值对象，表示要设置的值。
+ * @param expire 过期时间对象，表示键的过期时间。
+ * @param unit 时间单位，表示过期时间的单位。
+ * @param ok_reply 操作成功时的回复对象。
+ * @param abort_reply 操作失败时的回复对象。
+ */
+void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire, int unit, robj *ok_reply, robj *abort_reply) {
+    // 初始化变量以避免潜在的未初始化警告
+    long long milliseconds = 0, when = 0;
+
+    // 处理过期时间
     if (expire) {
+        // 将过期时间对象转换为长整型
         if (getLongLongFromObjectOrReply(c, expire, &milliseconds, NULL) != C_OK)
             return;
+        // 检查过期时间的有效性
         if (milliseconds <= 0 || (unit == UNIT_SECONDS && milliseconds > LLONG_MAX / 1000)) {
-            /* Negative value provided or multiplication is gonna overflow. */
             addReplyErrorFormat(c, "invalid expire time in %s", c->cmd->name);
             return;
         }
+        // 将秒转换为毫秒
         if (unit == UNIT_SECONDS) milliseconds *= 1000;
         when = milliseconds;
+        // 处理相对过期时间
         if ((flags & OBJ_PX) || (flags & OBJ_EX))
             when += mstime();
+        // 检查过期时间是否溢出
         if (when <= 0) {
-            /* Overflow detected. */
             addReplyErrorFormat(c, "invalid expire time in %s", c->cmd->name);
             return;
         }
     }
 
+    // 处理条件设置
     if ((flags & OBJ_SET_NX && lookupKeyWrite(c->db,key) != NULL) ||
         (flags & OBJ_SET_XX && lookupKeyWrite(c->db,key) == NULL))
     {
@@ -108,43 +129,41 @@ void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire,
         return;
     }
 
+    // 处理GET选项
     if (flags & OBJ_SET_GET) {
         if (getGenericCommand(c) == C_ERR) return;
     }
 
+    // 设置键值对
     genericSetKey(c,c->db,key, val,flags & OBJ_KEEPTTL,1);
+    // 更新脏值计数
     g_pserver->dirty++;
+    // 通知键空间事件
     notifyKeyspaceEvent(NOTIFY_STRING,"set",key,c->db->id);
+    // 处理过期时间
     if (expire) {
         setExpire(c,c->db,key,nullptr,when);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"expire",key,c->db->id);
 
-        /* Propagate as SET Key Value PXAT millisecond-timestamp if there is EXAT/PXAT or
-         * propagate as SET Key Value PX millisecond if there is EX/PX flag.
-         *
-         * Additionally when we propagate the SET with PX (relative millisecond) we translate
-         * it again to SET with PXAT for the AOF.
-         *
-         * Additional care is required while modifying the argument order. AOF relies on the
-         * exp argument being at index 3. (see feedAppendOnlyFile)
-         * */
+        // 根据标志选择适当的过期时间设置命令
         robj *exp = (flags & OBJ_PXAT) || (flags & OBJ_EXAT) ? shared.pxat : shared.px;
         robj *millisecondObj = createStringObjectFromLongLong(milliseconds);
+        // 重写命令向量以适应AOF持久化
         rewriteClientCommandVector(c,5,shared.set,key,val,exp,millisecondObj);
         decrRefCount(millisecondObj);
     }
+    // 发送回复
     if (!(flags & OBJ_SET_GET)) {
         addReply(c, ok_reply ? ok_reply : shared.ok);
     }
 
-    /* Propagate without the GET argument (Isn't needed if we had expire since in that case we completely re-written the command argv) */
+    // 重写命令向量以适应PROPAGATE选项
     if ((flags & OBJ_SET_GET) && !expire) {
         int argc = 0;
         int j;
         robj **argv = (robj**)zmalloc((c->argc-1)*sizeof(robj*));
         for (j=0; j < c->argc; j++) {
             const char *a = szFromObj(c->argv[j]);
-            /* Skip GET which may be repeated multiple times. */
             if (j >= 3 &&
                 (a[0] == 'g' || a[0] == 'G') &&
                 (a[1] == 'e' || a[1] == 'E') &&

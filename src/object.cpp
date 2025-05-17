@@ -473,6 +473,20 @@ void trimStringObjectIfNeeded(robj *o) {
 }
 
 /* Try to encode a string object in order to save space */
+/**
+ * 尝试对字符串对象进行内存优化编码转换
+ *
+ * 参数:
+ *   o - 需要编码优化的字符串对象，必须为OBJ_STRING类型
+ *
+ * 返回值:
+ *   robj* - 编码优化后的对象指针（可能为原对象或新创建的对象）
+ *           返回类型可能包含：
+ *           1. 原始对象（未满足优化条件）
+ *           2. 整数编码对象（OBJ_ENCODING_INT）
+ *           3. 嵌入式字符串对象（OBJ_ENCODING_EMBSTR）
+ *           4. 共享整数对象（共享池中的标准对象）
+ */
 robj *tryObjectEncoding(robj *o) {
     long value;
     sds s = szFromObj(o);
@@ -481,22 +495,36 @@ robj *tryObjectEncoding(robj *o) {
     /* Make sure this is a string object, the only type we encode
      * in this function. Other types use encoded memory efficient
      * representations but are handled by the commands implementing
-     * the type. */
+     * the type.
+     * 确保输入对象为字符串类型
+     * Redis的其他数据类型（如列表、集合等）由各自的命令实现处理
+     */
     serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
 
     /* We try some specialized encoding only for objects that are
      * RAW or EMBSTR encoded, in other words objects that are still
-     * in represented by an actually array of chars. */
+     * in represented by an actually array of chars.
+     * 仅处理原始字符串编码类型：
+     * OBJ_ENCODING_RAW（普通SDS）和OBJ_ENCODING_EMBSTR（嵌入式SDS）
+     */
     if (!sdsEncodedObject(o)) return o;
 
     /* It's not safe to encode shared objects: shared objects can be shared
      * everywhere in the "object space" of Redis and may end in places where
-     * they are not handled. We handle them only as values in the keyspace. */
+     * they are not handled. We handle them only as values in the keyspace.
+     * 避免修改被多处引用的共享对象
+     * 共享对象可能存在于全局多个位置，修改会导致不可预知的问题
+     */
      if (o->getrefcount(std::memory_order_relaxed) > 1) return o;
 
     /* Check if we can represent this string as a long integer.
      * Note that we are sure that a string larger than 20 chars is not
-     * representable as a 32 nor 64 bit integer. */
+     * representable as a 32 nor 64 bit integer.
+     * 尝试将字符串转换为整数类型：
+     * 1. 长度超过20字符的字符串不可能是64位整数
+     * 2. 可转换成功时优先使用共享整数池（节省内存）
+     * 3. maxmemory启用时禁用共享整数（需要独立的LRU信息）
+     */
     len = sdslen(s);
     if (len <= 20 && string2l(s,len,&value)) {
         /* This object is encodable as a long. Try to use a shared object.
@@ -527,7 +555,10 @@ robj *tryObjectEncoding(robj *o) {
     /* If the string is small and is still RAW encoded,
      * try the EMBSTR encoding which is more efficient.
      * In this representation the object and the SDS string are allocated
-     * in the same chunk of memory to save space and cache misses. */
+     * in the same chunk of memory to save space and cache misses.
+     * 小字符串优化：转换为嵌入式字符串格式
+     * 将robj和SDS放在同一内存块，减少内存分配次数和缓存缺失
+     */
     if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT) {
         robj *emb;
 
@@ -545,7 +576,11 @@ robj *tryObjectEncoding(robj *o) {
      *
      * We do that only for relatively large strings as this branch
      * is only entered if the length of the string is greater than
-     * OBJ_ENCODING_EMBSTR_SIZE_LIMIT. */
+     * OBJ_ENCODING_EMBSTR_SIZE_LIMIT.
+     * 大字符串内存优化：
+     * 当SDS空闲空间超过10%时，进行内存收缩
+     * 此分支仅处理超过嵌入式字符串大小限制的对象
+     */
     trimStringObjectIfNeeded(o);
 
     /* Return the original object. */
@@ -1721,10 +1756,38 @@ uint64_t mvccFromObj(robj_roptr o)
     return OBJ_MVCC_INVALID;
 }
 
+
+/**
+ * 设置指定Redis对象的MVCC时间戳。
+ *
+ * 参数:
+ * o    - 指向robj对象的指针，该对象必须与其扩展结构体redisObjectExtended连续存储
+ * mvcc - 要设置的MVCC时间戳值（64位无符号整数）
+ *
+ * 返回值: 无
+ *
+ * 注意: 该函数仅在当前实例为活跃副本时生效
+ */
 void setMvccTstamp(robj *o, uint64_t mvcc)
 {
+    /**
+     * 检查当前实例是否为活跃副本节点
+     * 非活跃副本直接返回，不执行任何操作
+     */
     if (!g_pserver->fActiveReplica)
         return;
+
+    /**
+     * 定位关联的扩展结构体
+     * 通过指针运算获取robj对象前序存储的redisObjectExtended结构体
+     * 这种内存布局要求两个结构体必须连续存储
+     */
     redisObjectExtended *oe = reinterpret_cast<redisObjectExtended*>(o) - 1;
+
+    /**
+     * 更新扩展结构体中的MVCC时间戳字段
+     * 这个时间戳用于实现多版本并发控制（MVCC）机制
+     */
     oe->mvcc_tstamp = mvcc;
 }
+
