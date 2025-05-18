@@ -285,25 +285,49 @@ int aePostFunction(aeEventLoop *eventLoop, aePostFunctionTokenProc *proc, Storag
     return AE_OK;
 }
 
+/**
+ * 将指定的C++函数对象投递到目标事件循环中执行。
+ *
+ * 如果当前线程就是事件循环所属线程且未强制要求队列执行，则直接同步执行该函数；
+ * 否则通过管道将函数封装为异步命令写入事件循环进行异步处理。
+ *
+ * 参数说明：
+ * @param eventLoop 目标事件循环对象指针
+ * @param fn        待执行的C++函数对象
+ * @param fLock     是否需要加锁处理（具体锁机制由事件循环实现决定）
+ * @param fForceQueue 是否强制通过异步队列执行（忽略当前线程优化）
+ *
+ * 返回值：
+ * @return AE_OK    成功投递或已直接执行
+ * @return AE_ERR   管道写入失败
+ */
 int aePostFunction(aeEventLoop *eventLoop, std::function<void()> fn, bool fLock, bool fForceQueue)
 {
+    // 当前线程优化：若目标事件循环属于当前线程且未强制要求队列执行
+    // 则直接同步执行函数以避免上下文切换开销
     if (eventLoop == g_eventLoopThisThread && !fForceQueue)
     {
         fn();
         return AE_OK;
     }
 
+    // 构造异步命令结构体
     aeCommand cmd = {};
-    cmd.op = AE_ASYNC_OP::PostCppFunction;
-    cmd.pfn = new std::function<void()>(fn);
-    cmd.fLock = fLock;
+    cmd.op = AE_ASYNC_OP::PostCppFunction;  // 设置操作类型为C++函数投递
+    cmd.pfn = new std::function<void()>(fn); // 拷贝函数对象到堆内存
+    cmd.fLock = fLock;                      // 保存锁标志
 
+    // 通过管道写入异步命令
     auto size = write(eventLoop->fdCmdWrite, &cmd, sizeof(cmd));
+
+    // 管道写入完整性校验（非调试模式下可能不生效）
+    // 正常情况应完整写入整个命令结构体
     if (!(!size || size == sizeof(cmd))) {
         printf("Last error: %d\n", errno);
     }
     serverAssert(!size || size == sizeof(cmd));
 
+    // 返回执行状态
     if (size == 0)
         return AE_ERR;
 

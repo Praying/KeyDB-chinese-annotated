@@ -3795,11 +3795,28 @@ void makeThreadKillable(void) {
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 }
 
+/**
+ * @brief 初始化网络线程，配置TCP/TLS监听套接字及事件处理机制
+ *
+ * 该函数为指定事件循环索引初始化网络监听功能，支持端口复用特性。
+ * 根据参数配置创建TCP/TLS监听套接字，并注册连接接受事件处理器。
+ * 若初始化失败将触发程序终止。
+ *
+ * @param iel 事件循环索引，用于定位线程本地存储的网络资源
+ * @param fReusePort 标志位指示是否启用SO_REUSEPORT特性
+ * @return 无返回值（失败时直接exit()终止程序）
+ */
 static void initNetworkingThread(int iel, int fReusePort)
 {
     /* Open the TCP listening socket for the user commands. */
     if (fReusePort || (iel == IDX_EVENT_LOOP_MAIN))
     {
+        /*
+         * 主线程或启用端口复用时：
+         * 1. 为TCP端口创建监听套接字
+         * 2. 为TLS端口创建监听套接字
+         * 任一失败都将记录警告日志并终止程序
+         */
         if (g_pserver->port != 0 &&
             listenToPort(g_pserver->port,&g_pserver->rgthreadvar[iel].ipfd, fReusePort, (iel == IDX_EVENT_LOOP_MAIN)) == C_ERR) {
             serverLog(LL_WARNING, "Failed listening on port %u (TCP), aborting.", g_pserver->port);
@@ -3813,12 +3830,20 @@ static void initNetworkingThread(int iel, int fReusePort)
     }
     else
     {
-        // We use the main threads file descriptors
+        /*
+         * 子线程复用主线程TCP套接字：
+         * 复制主线程的IP文件描述符结构体
+         * 保持计数器字段的显式同步
+         */
         memcpy(&g_pserver->rgthreadvar[iel].ipfd, &g_pserver->rgthreadvar[IDX_EVENT_LOOP_MAIN].ipfd, sizeof(socketFds));
         g_pserver->rgthreadvar[iel].ipfd.count = g_pserver->rgthreadvar[IDX_EVENT_LOOP_MAIN].ipfd.count;
     }
 
-    /* Create an event handler for accepting new connections in TCP */
+    /*
+     * 注册TCP连接接受事件：
+     * 为每个TCP监听套接字注册READABLE事件处理器
+     * 使用线程安全标志确保多线程环境下的安全性
+     */
     for (int j = 0; j < g_pserver->rgthreadvar[iel].ipfd.count; j++) {
         if (aeCreateFileEvent(g_pserver->rgthreadvar[iel].el, g_pserver->rgthreadvar[iel].ipfd.fd[j], AE_READABLE|AE_READ_THREADSAFE,
             acceptTcpHandler,NULL) == AE_ERR)
@@ -3830,6 +3855,11 @@ static void initNetworkingThread(int iel, int fReusePort)
 
     makeThreadKillable();
 
+    /*
+     * 注册TLS连接接受事件：
+     * 为每个TLS监听套接字注册READABLE事件处理器
+     * 使用线程安全标志确保多线程环境下的安全性
+     */
     for (int j = 0; j < g_pserver->rgthreadvar[iel].tlsfd.count; j++) {
         if (aeCreateFileEvent(g_pserver->rgthreadvar[iel].el, g_pserver->rgthreadvar[iel].tlsfd.fd[j], AE_READABLE|AE_READ_THREADSAFE,
             acceptTLSHandler,NULL) == AE_ERR)
@@ -3840,15 +3870,24 @@ static void initNetworkingThread(int iel, int fReusePort)
     }
 }
 
+/**
+ * 初始化网络子系统，设置主线程的网络配置并创建监听套接字。
+ *
+ * 参数:
+ *   fReusePort  整数标志，指示是否启用端口复用功能（SO_REUSEPORT）。
+ *
+ * 返回值:
+ *   无。函数通过exit()在初始化失败时终止程序。
+ */
 static void initNetworking(int fReusePort)
 {
     // We only initialize the main thread here, since RDB load is a special case that processes
     //  clients before our server threads are launched.
     initNetworkingThread(IDX_EVENT_LOOP_MAIN, fReusePort);
 
-    /* Open the listening Unix domain socket. */
+    /* 创建并配置Unix域套接字 */
     if (g_pserver->unixsocket != NULL) {
-        unlink(g_pserver->unixsocket); /* don't care if this fails */
+        unlink(g_pserver->unixsocket); /* 不关心unlink失败情况 */
         g_pserver->sofd = anetUnixServer(serverTL->neterr,g_pserver->unixsocket,
             g_pserver->unixsocketperm, g_pserver->tcp_backlog);
         if (g_pserver->sofd == ANET_ERR) {
@@ -3858,12 +3897,19 @@ static void initNetworking(int fReusePort)
         anetNonBlock(NULL,g_pserver->sofd);
     }
 
-    /* Abort if there are no listening sockets at all. */
+    /**
+     * 确保至少存在一个监听套接字（IPv4/IPv6/TLS/Unix域）。
+     * 如果完全未配置监听地址，直接终止程序。
+     */
     if (g_pserver->rgthreadvar[IDX_EVENT_LOOP_MAIN].ipfd.count == 0 && g_pserver->rgthreadvar[IDX_EVENT_LOOP_MAIN].tlsfd.count == 0 && g_pserver->sofd < 0) {
         serverLog(LL_WARNING, "Configured to not listen anywhere, exiting.");
         exit(1);
     }
 
+    /**
+     * 注册Unix域套接字的可读事件处理器。
+     * 该事件处理将由专用线程处理传入的客户端连接。
+     */
     if (g_pserver->sofd > 0 && aeCreateFileEvent(g_pserver->rgthreadvar[IDX_EVENT_LOOP_MAIN].el,g_pserver->sofd,AE_READABLE|AE_READ_THREADSAFE,
         acceptUnixHandler,NULL) == AE_ERR) serverPanic("Unrecoverable error creating g_pserver->sofd file event.");
 }

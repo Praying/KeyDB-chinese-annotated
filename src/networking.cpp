@@ -1245,13 +1245,24 @@ void clientAcceptHandler(connection *conn) {
 #define MAX_ACCEPTS_PER_CALL 1000
 #define MAX_ACCEPTS_PER_CALL_TLS 100
 
+/**
+ * 处理客户端连接接受的通用逻辑
+ *
+ * @param conn  连接对象指针，表示正在处理的客户端连接
+ * @param flags 客户端标志位集合，用于初始化新创建的客户端对象
+ * @param ip    客户端IP地址字符串（未使用）
+ * @param iel   事件循环索引，用于指定客户端关联的事件循环
+ *
+ * @return 无返回值。函数通过创建客户端对象并启动连接接受流程，
+ *         或在出错时关闭连接并记录日志。
+ */
 static void acceptCommonHandler(connection *conn, int flags, char *ip, int iel) {
     client *c;
     char conninfo[100];
     UNUSED(ip);
     AeLocker locker;
     locker.arm(nullptr);
-
+    /* 检查连接状态有效性 */
     if (connGetState(conn) != CONN_STATE_ACCEPTING) {
         serverLog(LL_VERBOSE,
             "Accepted client connection in error state: %s (conn: %s)",
@@ -1336,11 +1347,30 @@ static void acceptCommonHandler(connection *conn, int flags, char *ip, int iel) 
     }
 }
 
+/*
+ * Function: acceptOnThread
+ * ------------------------
+ * 将新连接分配到合适的线程进行处理，根据服务器状态决定目标线程并处理跨线程投递。
+ *
+ * Parameters:
+ *   conn    - 指向新建立的连接对象的指针
+ *   flags   - 接受连接时的标志位（如非阻塞模式等）
+ *   cip     - 客户端IP地址字符串缓冲区，可能为NULL
+ *
+ * Returns:
+ *   无显式返回值。若跨线程投递成功则直接返回，否则在本地线程同步处理连接。
+ */
 void acceptOnThread(connection *conn, int flags, char *cip)
 {
     int ielCur = ielFromEventLoop(serverTL->el);
     bool fBootLoad = (g_pserver->loading == LOADING_BOOT);
 
+    /*
+     * 确定目标事件循环线程索引
+     * - 启动加载阶段强制使用主线程
+     * - 测试模式随机选择非主线程避免客户端聚集
+     * - 启用客户端均衡时根据集群状态选择线程
+     */
     int ielTarget = ielCur;
     if (fBootLoad)
     {
@@ -1359,7 +1389,15 @@ void acceptOnThread(connection *conn, int flags, char *cip)
         ielTarget = g_pserver->cluster_enabled ? ielCur : chooseBestThreadForAccept();
     }
 
+    // 增加目标线程的连接处理计数器（使用relaxed内存序优化性能）
     rgacceptsInFlight[ielTarget].fetch_add(1, std::memory_order_relaxed);
+
+    /*
+     * 跨线程投递连接处理任务
+     * 1. 需要复制客户端IP字符串保证异步访问安全
+     * 2. 通过aePostFunction将处理逻辑提交到目标线程
+     * 3. 投递失败时回退到本地线程处理
+     */
     if (ielTarget != ielCur)
     {
         char *szT = nullptr;
@@ -1379,8 +1417,13 @@ void acceptOnThread(connection *conn, int flags, char *cip)
             return;
         // If res != AE_OK we can still try to accept on the local thread
     }
+    // 投递失败时减少目标线程计数器
     rgacceptsInFlight[ielTarget].fetch_sub(1, std::memory_order_relaxed);
 
+    /*
+     * 本地线程同步处理连接
+     * 使用全局锁保证单线程处理安全
+     */
     aeAcquireLock();
     acceptCommonHandler(conn,flags,cip,ielCur);
     aeReleaseLock();
@@ -2634,9 +2677,32 @@ bool FAsyncCommand(parsed_command &cmd)
  * more query buffer to process, because we read more data from the socket
  * or because a client was blocked and later reactivated, so there could be
  * pending query buffer, already representing a full command, to process. */
+/**
+ * 处理客户端输入缓冲区中的命令队列
+ *
+ * @param c         客户端对象指针，包含命令队列和执行状态
+ * @param fParse    是否需要先解析输入缓冲区标志
+ *                  true: 先解析缓冲区生成命令队列
+ *                  false: 直接处理已存在的命令队列
+ * @param callFlags 命令执行标志位，支持以下位掩码：
+ *                  CMD_CALL_ASYNC - 异步执行模式标志
+ * @return          无返回值。当命令处理出错且客户端失效时直接返回
+ *
+ * 主要流程：
+ * 1. 线程安全性检查（AssertCorrectThread）
+ * 2. 可选的命令解析阶段（parseClientCommandBuffer）
+ * 3. 命令队列处理循环：
+ *    - 命令完整性检查（参数数量是否完整）
+ *    - 执行状态互斥检查（避免并发执行）
+ *    - 客户端就绪状态检查（FClientReady）
+ *    - 异步执行条件检查（FAsyncCommand）
+ *    - 命令参数迁移与队列清理
+ *    - 空命令处理（resetClient）
+ *    - 命令实际执行（processCommandAndResetClient）
+ */
 void processInputBuffer(client *c, bool fParse, int callFlags) {
     AssertCorrectThread(c);
-    
+
     if (fParse)
         parseClientCommandBuffer(c);
 
@@ -2681,6 +2747,15 @@ void processInputBuffer(client *c, bool fParse, int callFlags) {
     }
 }
 
+/**
+ * 从客户端连接读取查询数据到缓冲区，并处理相关状态更新及命令解析。
+ *
+ * 参数:
+ *     conn (connection*) 客户端连接对象，包含连接相关的数据和状态
+ *
+ * 返回值:
+ *     void 该函数无显式返回值，但可能通过异步操作释放客户端资源或触发命令处理
+ */
 void readQueryFromClient(connection *conn) {
     client *c = (client*)connGetPrivateData(conn);
     serverAssert(conn == c->conn);
@@ -2692,13 +2767,17 @@ void readQueryFromClient(connection *conn) {
     
     AeLocker aelock;
     AssertCorrectThread(c);
+    /* 使用延迟锁策略尝试获取客户端锁，避免阻塞其他操作
+     * 若锁竞争失败立即返回，让出CPU处理其他任务 */
     std::unique_lock<decltype(c->lock)> lock(c->lock, std::defer_lock);
     if (!lock.try_lock())
         return; // Process something else while we wait
 
-    /* Update total number of reads on server */
+    /* Update total number of reads on server  更新服务器全局读取计数器，用于监控和统计*/
     g_pserver->stat_total_reads_processed.fetch_add(1, std::memory_order_relaxed);
-
+    /* 预分配默认读取长度，针对多批量大参数场景优化内存拷贝
+     * 当处理Redis协议的MULTIBULK请求且参数体积较大时，动态调整读取长度
+     * 保证查询缓冲区完整承载参数，避免后续内存复制开销 */
     readlen = PROTO_IOBUF_LEN;
     /* If this is a multi bulk request, and we are processing a bulk reply
      * that is large enough, try to maximize the probability that the query
@@ -2719,7 +2798,10 @@ void readQueryFromClient(connection *conn) {
     qblen = sdslen(c->querybuf);
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
-
+    /* 执行底层数据读取操作，处理不同返回状态：
+     * -1: 非阻塞状态需重试，保持连接等待下次事件
+     *  0: 客户端主动关闭连接
+     * >0: 成功读取nread字节数据 */
     nread = connRead(c->conn, c->querybuf+qblen, readlen);
     
     if (nread == -1) {
