@@ -2322,8 +2322,25 @@ struct MasterSaveInfo {
  * replication in order to make sure that chained slaves (slaves of slaves)
  * select the correct DB and are able to accept the stream coming from the
  * top-level master. */
+/**
+ * @class rdbSaveInfo
+ * @brief 管理RDB持久化过程中的复制相关信息
+ *
+ * 该类用于在RDB文件保存和加载过程中维护复制相关的元数据，
+ * 包括复制ID、偏移量、主从节点关系等关键信息。
+ */
 class rdbSaveInfo {
 public:
+    /**
+     * @brief 默认构造函数
+     *
+     * 初始化复制相关参数为默认值：
+     * - repl_stream_db 设置为-1表示无效数据库索引
+     * - repl_id 使用全零字符串填充
+     * - repl_offset 设置为-1表示无效偏移量
+     * - 强制设置键标志置为TRUE
+     * - MVCC最小阈值初始化为0
+     */
     rdbSaveInfo() {
         repl_stream_db = -1;
         repl_id_is_set = 0;
@@ -2333,6 +2350,17 @@ public:
         fForceSetKey = TRUE;
         mvccMinThreshold = 0;
     }
+
+    /**
+     * @brief 拷贝构造函数
+     *
+     * @param other 要复制的源对象
+     * 深度复制所有成员变量，包括：
+     * - 复制ID状态
+     * - 复制偏移量
+     * - 主从节点关系向量
+     * - MVCC阈值
+     */
     rdbSaveInfo(const rdbSaveInfo &other) {
         repl_stream_db = other.repl_stream_db;
         repl_id_is_set = other.repl_id_is_set;
@@ -2345,6 +2373,15 @@ public:
         mi = other.mi;
     }
 
+    /**
+     * @brief 赋值运算符
+     *
+     * @param other 要复制的源对象
+     * @return rdbSaveInfo& 当前对象引用
+     *
+     * 复制所有成员变量并返回自身引用，
+     * 保持与拷贝构造函数一致的复制逻辑
+     */
     rdbSaveInfo &operator=(const rdbSaveInfo &other) {
         repl_stream_db = other.repl_stream_db;
         repl_id_is_set = other.repl_id_is_set;
@@ -2359,28 +2396,99 @@ public:
         return *this;
     }
 
+    /**
+     * @brief 添加主节点保存信息
+     *
+     * @param si 要添加的主节点信息对象
+     * 将指定的主节点信息追加到vecmastersaveinfo向量末尾
+     */
     void addMaster(const MasterSaveInfo &si) {
         vecmastersaveinfo.push_back(si);
     }
 
+    /**
+     * @brief 获取主节点数量
+     *
+     * @return size_t 当前存储的主节点信息数量
+     * 返回vecmastersaveinfo向量的元素个数
+     */
     size_t numMasters() {
         return vecmastersaveinfo.size();
     }
 
     /* Used saving and loading. */
+    /**
+     * @brief 目标数据库索引
+     *
+     * 指定在主客户端中需要选择的数据库索引号
+     * 仅在RDB保存和加载过程中使用
+     */
     int repl_stream_db;  /* DB to select in g_pserver->master client. */
 
     /* Used only loading. */
+    /**
+     * @brief 复制ID有效性标志
+     *
+     * 标示repl_id字段是否已被正确设置
+     * 非零值表示复制ID有效
+     */
     int repl_id_is_set;  /* True if repl_id field is set. */
+
+    /**
+     * @brief 复制ID字符串
+     *
+     * 存储40字节长度的复制ID（含终止符）
+     * 符合CONFIG_RUN_ID_SIZE配置定义的长度要求
+     */
     char repl_id[CONFIG_RUN_ID_SIZE+1];     /* Replication ID. */
+
+    /**
+     * @brief 复制偏移量
+     *
+     * 记录当前复制进度的64位整数偏移量
+     * -1表示无效偏移量
+     */
     long long repl_offset;                  /* Replication offset. */
+
+    /**
+     * @brief 强制设置键标志
+     *
+     * 控制是否强制设置键值的布尔标志
+     * TRUE表示忽略常规条件强制进行设置
+     */
     int fForceSetKey;
 
     /* Used In Save */
+    /**
+     * @brief 主节点复制偏移量
+     *
+     * 保存过程中记录主节点的复制偏移量
+     * 用于维护复制链的一致性
+     */
     long long master_repl_offset;
 
+    /**
+     * @brief MVCC最小版本阈值
+     *
+     * 64位无符号整数，控制多版本并发控制的最小版本号
+     * 用于优化快照隔离级别的内存管理
+     */
     uint64_t mvccMinThreshold;
+
+    /**
+     * @brief 主节点信息向量
+     *
+     * 存储所有关联主节点的保存信息
+     * 支持多级复制拓扑的持久化记录
+     */
     std::vector<MasterSaveInfo> vecmastersaveinfo;
+
+    /**
+     * @brief Redis主节点指针
+     *
+     * 指向关联的redisMaster结构体
+     * 默认初始化为空指针
+     */
     struct redisMaster *mi = nullptr;
 };
 

@@ -1311,6 +1311,35 @@ ssize_t rdbSaveSingleModuleAux(rio *rdb, int when, moduleType *mt) {
  * When the function returns C_ERR and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the value of errno just after the I/O
  * error. */
+/* 将数据库以 RDB 格式转储并通过指定的 Redis I/O 通道发送。
+ * 成功时返回 C_OK，失败时返回 C_ERR。由于 I/O 错误，
+ * 部分或全部输出数据可能丢失。
+ *
+ * 当函数返回 C_ERR 且 'error' 参数非空时：
+ * - 通过 'error' 指针返回发生 I/O 错误时的 errno 值
+ */
+/**
+ * 将Redis数据库状态保存到RDB文件中。
+ *
+ * @param rdb 指向rio结构的指针，用于处理实际的数据写入操作
+ * @param rgpdb 指向数据库快照数组的指针，若为NULL则使用全局数据库数组
+ * @param error 用于返回错误代码的整型指针，若发生错误将设置为errno值
+ * @param rdbflags RDB保存标志位，支持以下标志：
+ *                 - RDBFLAGS_AOF_PREAMBLE: 表示作为AOF前导文件写入
+ * @param rsi 指向rdbSaveInfo结构的指针，包含保存所需的额外信息
+ * @return 成功返回C_OK(0)，失败返回C_ERR(-1)并可能设置error值
+ *
+ * 主要流程：
+ * 1. 写入RDB文件魔数和版本号
+ * 2. 保存辅助字段和模块前置数据
+ * 3. 遍历所有数据库并执行以下操作：
+ *    a. 写入SELECT DB操作码及数据库索引
+ *    b. 写入RESIZEDB操作码及数据库大小信息
+ *    c. 线程安全地遍历数据库中的所有键并保存
+ * 4. 持久化Lua脚本缓存以支持复制场景
+ * 5. 保存模块后置数据
+ * 6. 写入EOF结束标记和CRC64校验和
+ */
 int rdbSaveRio(rio *rdb, const redisDbPersistentDataSnapshot **rgpdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     dictEntry *de;
     dictIterator *di = NULL;
@@ -1321,14 +1350,16 @@ int rdbSaveRio(rio *rdb, const redisDbPersistentDataSnapshot **rgpdb, int *error
     long key_count = 0;
     long long info_updated_time = 0;
     const char *pname = (rdbflags & RDBFLAGS_AOF_PREAMBLE) ? "AOF rewrite" :  "RDB";
-
+    // 设置校验和计算回调函数
     if (g_pserver->rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
+    // 写入RDB文件魔数和版本号
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
+    // 保存辅助字段和模块前置数据
     if (rdbSaveInfoAuxFields(rdb,rdbflags,rsi) == -1) goto werr;
     if (rdbSaveModulesAux(rdb, REDISMODULE_AUX_BEFORE_RDB) == -1) goto werr;
-
+    // 遍历所有数据库并保存数据
     for (j = 0; j < cserver.dbnum; j++) {
         const redisDbPersistentDataSnapshot *db = rgpdb != nullptr ? rgpdb[j] : g_pserver->db[j];
         if (db->size() == 0) continue;
@@ -1345,7 +1376,7 @@ int rdbSaveRio(rio *rdb, const redisDbPersistentDataSnapshot **rgpdb, int *error
         if (rdbSaveLen(rdb,db_size) == -1) goto werr;
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
         
-        /* Iterate this DB writing every entry */
+        // 线程安全地遍历数据库中的所有键并保存
         size_t ckeysExpired = 0;
         bool fSavedAll = db->iterate_threadsafe([&](const char *keystr, robj_roptr o)->bool {
             if (o->FExpires())
@@ -1357,6 +1388,7 @@ int rdbSaveRio(rio *rdb, const redisDbPersistentDataSnapshot **rgpdb, int *error
             /* Update child info every 1 second (approximately).
              * in order to avoid calling mstime() on each iteration, we will
              * check the diff every 1024 keys */
+            // 每处理1024个键更新一次子进程状态信息
             if ((key_count++ & 1023) == 0) {
                 long long now = mstime();
                 if (now - info_updated_time >= 1000) {
@@ -1376,6 +1408,10 @@ int rdbSaveRio(rio *rdb, const redisDbPersistentDataSnapshot **rgpdb, int *error
      * the script cache as well: on successful PSYNC after a restart, we need
      * to be able to process any EVALSHA inside the replication backlog the
      * master will send us. */
+    /* 若需将复制信息持久化到磁盘，须同时持久化脚本缓存（script cache）：
+     * 当实例重启后成功执行 PSYNC 时，我们需要能处理主服务器发送的复制积压缓冲区（replication backlog）
+     * 中可能包含的 EVALSHA 命令。
+     */
     {
     AeLocker lock;
     lock.arm(nullptr);
@@ -1392,15 +1428,15 @@ int rdbSaveRio(rio *rdb, const redisDbPersistentDataSnapshot **rgpdb, int *error
         di = NULL; /* So that we don't release it again on error. */
     }
     }   // AeLocker end scope
-
+    // 保存模块后置数据
     if (rdbSaveModulesAux(rdb, REDISMODULE_AUX_AFTER_RDB) == -1) goto werr;
 
-    /* EOF opcode */
+    /* EOF opcode */    // 写入EOF结束标记
     if (rdbSaveType(rdb,RDB_OPCODE_EOF) == -1) goto werr;
 
     /* CRC64 checksum. It will be zero if checksum computation is disabled, the
      * loading code skips the check in this case. */
-    cksum = rdb->cksum;
+    cksum = rdb->cksum;    // 计算并写入CRC64校验和
     memrev64ifbe(&cksum);
     if (rioWrite(rdb,&cksum,8) == 0) goto werr;
     return C_OK;
@@ -1457,9 +1493,23 @@ int rdbSaveFp(FILE *fp, const redisDbPersistentDataSnapshot **rgpdb, rdbSaveInfo
     return C_OK;
 }
 
+/*
+ * 保存Redis数据库的持久化数据到RDB文件及可选的S3存储
+ *
+ * 参数:
+ *   rgpdb - 指向数据库持久化快照数组的指针。若为nullptr，将自动收集所有数据库快照
+ *   rsi   - 保存操作的附加信息结构体指针
+ *
+ * 返回值:
+ *   C_OK 表示成功，其他值表示错误代码
+ */
 int rdbSave(const redisDbPersistentDataSnapshot **rgpdb, rdbSaveInfo *rsi)
 {
     std::vector<const redisDbPersistentDataSnapshot*> vecdb;
+    /*
+     * 当未指定特定数据库时，自动收集所有数据库的持久化快照
+     * 遍历服务器配置的所有数据库实例，获取对应的快照指针
+     */
     if (rgpdb == nullptr)
     {
         for (int idb = 0; idb < cserver.dbnum; ++idb)
@@ -1470,15 +1520,31 @@ int rdbSave(const redisDbPersistentDataSnapshot **rgpdb, rdbSaveInfo *rsi)
     }
 
     int err = C_OK;
+    /*
+     * 优先尝试将RDB数据保存到本地文件系统
+     * 若配置了有效的文件路径，则执行文件保存操作
+     */
     if (g_pserver->rdb_filename != NULL)
         err = rdbSaveFile(g_pserver->rdb_filename, rgpdb, rsi);
 
+    /*
+     * 仅当文件保存成功且配置了S3存储路径时
+     * 执行将RDB数据上传到AWS S3的操作
+     */
     if (err == C_OK && g_pserver->rdb_s3bucketpath != NULL)
         err = rdbSaveS3(g_pserver->rdb_s3bucketpath, rgpdb, rsi);
     return err;
 }
 
 /* Save the DB on disk. Return C_ERR on error, C_OK on success. */
+/**
+ * 保存Redis数据库到指定的RDB文件中
+ *
+ * @param filename RDB文件的路径名
+ * @param rgpdb 指向持久化数据库快照的指针数组
+ * @param rsi 保存操作的附加信息结构体
+ * @return 成功返回C_OK，失败返回C_ERR
+ */
 int rdbSaveFile(char *filename, const redisDbPersistentDataSnapshot **rgpdb, rdbSaveInfo *rsi) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
@@ -1486,7 +1552,10 @@ int rdbSaveFile(char *filename, const redisDbPersistentDataSnapshot **rgpdb, rdb
     rio rdb;
     int error = 0;
 
+    /* 生成唯一的临时文件名用于保存操作 */
     getTempFileName(tmpfile, g_pserver->rdbThreadVars.tmpfileNum);
+
+    /* 以写模式打开临时文件 */
     fp = fopen(tmpfile,"w");
     if (!fp) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
@@ -1499,25 +1568,27 @@ int rdbSaveFile(char *filename, const redisDbPersistentDataSnapshot **rgpdb, rdb
         return C_ERR;
     }
 
+    /* 初始化rio流对象并标记保存操作开始 */
     rioInitWithFile(&rdb,fp);
     startSaving(RDBFLAGS_NONE);
 
+    /* 启用增量fsync特性（如果配置启用） */
     if (g_pserver->rdb_save_incremental_fsync)
         rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
 
+    /* 执行核心RDB保存操作 */
     if (rdbSaveRio(&rdb,rgpdb,&error,RDBFLAGS_NONE,rsi) == C_ERR) {
         errno = error;
         goto werr;
     }
 
-    /* Make sure data will not remain on the OS's output buffers */
+    /* 强制刷新内核缓冲区确保数据落盘 */
     if (fflush(fp)) goto werr;
     if (fsync(fileno(fp))) goto werr;
     if (fclose(fp)) { fp = NULL; goto werr; }
     fp = NULL;
-    
-    /* Use RENAME to make sure the DB file is changed atomically only
-     * if the generate DB file is ok. */
+
+    /* 原子性重命名临时文件到目标文件 */
     if (rename(tmpfile,filename) == -1) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
         serverLog(LL_WARNING,
@@ -1532,6 +1603,7 @@ int rdbSaveFile(char *filename, const redisDbPersistentDataSnapshot **rgpdb, rdb
         return C_ERR;
     }
 
+    /* 更新服务器持久化状态信息 */
     serverLog(LL_NOTICE,"DB saved on disk");
     if (!g_pserver->rdbThreadVars.fRdbThreadActive)
     {
@@ -1544,6 +1616,7 @@ int rdbSaveFile(char *filename, const redisDbPersistentDataSnapshot **rgpdb, rdb
     return C_OK;
 
 werr:
+    /* 处理保存过程中的写错误 */
     if (g_pserver->rdbThreadVars.fRdbThreadCancel)
         serverLog(LL_WARNING, "Background save cancelled");
     else
@@ -1554,46 +1627,87 @@ werr:
     return C_ERR;
 }
 
+
 struct rdbSaveThreadArgs
 {
     rdbSaveInfo rsi;
     const redisDbPersistentDataSnapshot *rgpdb[1];    // NOTE: Variable Length
 };
 
+
+/**
+ * RDB持久化线程函数，用于异步保存数据库快照到磁盘
+ *
+ * @param vargs 指向rdbSaveThreadArgs结构体的指针，包含保存所需的参数：
+ *              - rgpdb: 数据库数组指针
+ *              - rsi: 保存状态信息结构体
+ *
+ * @return void* 返回状态指针：
+ *               - 成功时返回0 (C_OK)
+ *               - 失败时返回1 (非C_OK)
+ */
 void *rdbSaveThread(void *vargs)
 {
+    // 标记线程进入在线状态，允许执行阻塞操作
     aeThreadOnline();
+
+    // 确保全局rdbThreadVars的fDone标志未被设置
     serverAssert(!g_pserver->rdbThreadVars.fDone);
+
+    // 将输入参数转换为实际类型
     rdbSaveThreadArgs *args = reinterpret_cast<rdbSaveThreadArgs*>(vargs);
+
+    // 确保线程局部存储未被初始化
     serverAssert(serverTL == nullptr);
+
+    // 创建并初始化线程局部变量
     redisServerThreadVars vars;
     serverTL = &vars;
+
+    // 启动垃圾收集器纪元，跟踪内存变化
     vars.gcEpoch = g_pserver->garbageCollector.startEpoch();
 
-    int retval = rdbSave(args->rgpdb, &args->rsi);    
+    // 执行实际的RDB保存操作
+    int retval = rdbSave(args->rgpdb, &args->rsi);
     if (retval == C_OK)
+        // 发送写时复制(COW)内存使用信息到父进程
         sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
 
-    // If we were told to cancel the requesting thread holds the lock for us
+    // 计算初始内存占用，用于后续COW内存计算
     ssize_t cbStart = zmalloc_used_memory();
+
+    // 结束所有数据库的异步快照行为
     for (int idb = 0; idb < cserver.dbnum; ++idb)
         g_pserver->db[idb]->endSnapshotAsync(args->rgpdb[idb]);
 
+    // 显式调用析构函数并释放参数内存
     args->~rdbSaveThreadArgs();
     zfree(args);
+
+    // 计算内存差异，统计COW使用的内存大小
     ssize_t cbDiff = (cbStart - (ssize_t)zmalloc_used_memory());
+
+    // 结束垃圾收集器当前纪元
     g_pserver->garbageCollector.endEpoch(vars.gcEpoch);
 
+    // 如果存在内存占用差异，记录COW内存使用日志
     if (cbDiff > 0)
     {
         serverLog(LL_NOTICE,
                 "%s: %zd MB of memory used by copy-on-write",
                 "RDB",cbDiff/(1024*1024));
     }
+
+    // 标记线程进入离线状态
     aeThreadOffline();
+
+    // 设置完成标志位
     g_pserver->rdbThreadVars.fDone = true;
+
+    // 返回转换后的状态值
     return (retval == C_OK) ? (void*)0 : (void*)1;
 }
+
 
 int rdbSaveBackgroundFork(rdbSaveInfo *rsi) {
     pid_t childpid;
@@ -1633,39 +1747,108 @@ int rdbSaveBackgroundFork(rdbSaveInfo *rsi) {
     return C_OK; /* unreached */
 }
 
+/**
+ * 启动RDB持久化保存线程
+ *
+ * 该函数根据配置选择两种持久化方式：
+ * 1. 后台fork进程方式（通过cserver.fForkBgSave控制）
+ * 2. 多线程方式（默认）
+ *
+ * 参数说明：
+ * @param child[out] 创建的线程ID
+ * @param rsi[in] RDB保存参数信息，若为nullptr则使用临时结构体
+ *
+ * 返回值：
+ * 成功返回C_OK，失败返回C_ERR
+ */
 int launchRdbSaveThread(pthread_t &child, rdbSaveInfo *rsi)
 {
+    /**
+     * 判断是否启用后台fork模式
+     * 该模式通过fork子进程处理RDB持久化
+     */
     if (cserver.fForkBgSave) {
         return rdbSaveBackgroundFork(rsi);
     } else
     {
+        /**
+         * 动态分配线程参数内存空间
+         * 包含基础结构体和每个数据库的快照指针数组
+         */
         rdbSaveThreadArgs *args = (rdbSaveThreadArgs*)zcalloc(sizeof(rdbSaveThreadArgs) + ((cserver.dbnum-1)*sizeof(redisDbPersistentDataSnapshot*)), MALLOC_LOCAL);
         args = new (args) rdbSaveThreadArgs();
+
+        /**
+         * 处理输入参数
+         * 若输入参数为空则使用临时结构体
+         * 复制复制ID和主节点偏移量用于一致性校验
+         */
         rdbSaveInfo rsiT;
         if (rsi == nullptr)
             rsi = &rsiT;
         args->rsi = *rsi;
         memcpy(&args->rsi.repl_id, g_pserver->replid, sizeof(g_pserver->replid));
         args->rsi.master_repl_offset = g_pserver->master_repl_offset;
-            
+
+        /**
+         * 为每个数据库创建MVCC快照
+         * 使用当前MVCC时间戳保证数据一致性
+         * 快照将在RDB写入完成后释放
+         */
         for (int idb = 0; idb < cserver.dbnum; ++idb)
             args->rgpdb[idb] = g_pserver->db[idb]->createSnapshot(getMvccTstamp(), false /* fOptional */);
 
+        /**
+         * 更新线程状态管理器
+         * 增加临时文件计数器，重置取消标志
+         */
         g_pserver->rdbThreadVars.tmpfileNum++;
         g_pserver->rdbThreadVars.fRdbThreadCancel = false;
+
+        /**
+         * 配置线程属性
+         * 设置8MB线程栈空间大小
+         */
         pthread_attr_t tattr;
         pthread_attr_init(&tattr);
         pthread_attr_setstacksize(&tattr, 1 << 23); // 8 MB
+
+        /**
+         * 创建子进程通信管道
+         * 用于线程间状态同步和错误报告
+         */
         openChildInfoPipe();
+
+        /**
+         * 创建持久化线程
+         * 若失败则执行完整资源清理流程
+         */
         if (pthread_create(&child, &tattr, rdbSaveThread, args)) {
             pthread_attr_destroy(&tattr);
+
+            /**
+             * 释放所有数据库快照资源
+             */
             for (int idb = 0; idb < cserver.dbnum; ++idb)
                 g_pserver->db[idb]->endSnapshot(args->rgpdb[idb]);
+
+            /**
+             * 显式调用析构并释放内存
+             */
             args->~rdbSaveThreadArgs();
             zfree(args);
+
+            /**
+             * 关闭通信管道并返回错误
+             */
             closeChildInfoPipe();
             return C_ERR;
         }
+
+        /**
+         * 销毁线程属性对象
+         * 设置当前子进程类型为RDB持久化线程
+         */
         pthread_attr_destroy(&tattr);
         g_pserver->child_type = CHILD_TYPE_RDB;
     }
@@ -1673,18 +1856,51 @@ int launchRdbSaveThread(pthread_t &child, rdbSaveInfo *rsi)
 }
 
 
+
+
+/**
+ * 启动后台保存RDB文件的线程
+ *
+ * 该函数通过fork子进程在后台执行RDB持久化操作，用于在不阻塞主线程的情况下
+ * 将内存数据写入磁盘。会检查当前是否存在活跃的子进程或正在进行的BGSAVE操作，
+ * 避免重复创建。
+ *
+ * 参数:
+ *   rsi - 指向rdbSaveInfo结构体的指针，包含保存RDB所需的上下文信息
+ *
+ * 返回值:
+ *   C_OK  - 成功启动后台保存线程
+ *   C_ERR - 启动失败（存在活跃进程/线程或fork失败）
+ */
 int rdbSaveBackground(rdbSaveInfo *rsi) {
     pthread_t child;
     long long start;
 
+    /**
+     * 检查当前是否存在活跃的子进程或正在进行的BGSAVE操作
+     * 若存在则拒绝重复执行，防止资源竞争和数据不一致
+     */
     if (hasActiveChildProcessOrBGSave()) return C_ERR;
 
+    /**
+     * 记录当前脏数据状态和开始时间戳
+     * 用于后续统计和状态跟踪
+     */
     g_pserver->dirty_before_bgsave = g_pserver->dirty;
     g_pserver->lastbgsave_try = time(NULL);
 
+    /**
+     * 开始性能监控：
+     * 1. 记录操作开始时间戳
+     * 2. 启动延迟监控计时器
+     */
     start = ustime();
     latencyStartMonitor(g_pserver->rdb_save_latency);
 
+    /**
+     * 创建子进程执行RDB保存操作
+     * 若fork失败则记录警告日志并更新状态
+     */
     if (launchRdbSaveThread(child, rsi) != C_OK) {
         g_pserver->lastbgsave_status = C_ERR;
         serverLog(LL_WARNING,"Can't save in background: fork: %s",
@@ -1692,19 +1908,39 @@ int rdbSaveBackground(rdbSaveInfo *rsi) {
         return C_ERR;
     }
 
+    /**
+     * 更新fork性能统计信息：
+     * 1. 计算fork耗时
+     * 2. 计算内存写入速率(GB/s)
+     * 3. 添加延迟样本到监控系统
+     */
     g_pserver->stat_fork_time = ustime()-start;
     g_pserver->stat_fork_rate = (double) zmalloc_used_memory() * 1000000 / g_pserver->stat_fork_time / (1024*1024*1024); /* GB per second. */
     latencyAddSampleIfNeeded("fork",g_pserver->stat_fork_time/1000);
+
+    /**
+     * 状态更新与日志记录：
+     * 1. 记录后台保存开始时间
+     * 2. 设置线程活跃标志
+     * 3. 保存子线程ID和类型
+     * 4. 输出通知日志
+     */
     serverLog(LL_NOTICE,"Background saving started");
     g_pserver->rdb_save_time_start = time(NULL);
     serverAssert(!g_pserver->rdbThreadVars.fRdbThreadActive);
     g_pserver->rdbThreadVars.fRdbThreadActive = true;
     g_pserver->rdbThreadVars.rdb_child_thread = child;
     g_pserver->rdb_child_type = RDB_CHILD_TYPE_DISK;
+
+    /**
+     * 调整字典扩容策略
+     * 根据当前内存使用情况优化后续内存管理策略
+     */
     updateDictResizePolicy();
 
     return C_OK;
 }
+
 
 void getTempFileName(char tmpfile[], int tmpfileNum) {
     char pid[32];
@@ -3971,11 +4207,23 @@ void saveCommand(client *c) {
 }
 
 /* BGSAVE [SCHEDULE] */
+/**
+ * 处理BGSAVE命令的函数，用于在后台异步保存数据到RDB文件。
+ *
+ * 参数:
+ * client *c - 客户端对象指针，包含请求参数和连接状态
+ *
+ * 返回值:
+ * 无直接返回值，通过客户端连接发送状态回复或错误信息
+ */
 void bgsaveCommand(client *c) {
     int schedule = 0;
 
-    /* The SCHEDULE option changes the behavior of BGSAVE when an AOF rewrite
-     * is in progress. Instead of returning an error a BGSAVE gets scheduled. */
+    /**
+     * 解析命令参数：
+     * - 如果参数数量为2且第二个参数是"schedule"，则设置调度标志
+     * - 否则返回语法错误
+     */
     if (c->argc > 1) {
         if (c->argc == 2 && !strcasecmp(szFromObj(c->argv[1]),"schedule")) {
             schedule = 1;
@@ -3985,9 +4233,23 @@ void bgsaveCommand(client *c) {
         }
     }
 
+    /**
+     * 准备RDB保存上下文信息
+     * rsi为本地保存信息对象，rsiptr指向有效保存信息结构
+     */
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
 
+    /**
+     * 状态检查与操作流程：
+     * 1. 如果已有RDB保存任务进行中，直接返回错误
+     * 2. 如果存在活跃子进程（如AOF重写）：
+     *    a. 若设置了schedule标志，标记延迟保存并返回调度确认
+     *    b. 否则提示冲突并建议使用SCHEDULE选项
+     * 3. 尝试启动后台保存：
+     *    a. 成功则返回启动确认
+     *    b. 失败则返回通用错误
+     */
     if (g_pserver->FRdbSaveInProgress()) {
         addReplyError(c,"Background save already in progress");
     } else if (hasActiveChildProcess()) {
@@ -4007,6 +4269,7 @@ void bgsaveCommand(client *c) {
     }
 }
 
+
 /* Populate the rdbSaveInfo structure used to persist the replication
  * information inside the RDB file. Currently the structure explicitly
  * contains just the currently selected DB from the master stream, however
@@ -4016,6 +4279,15 @@ void bgsaveCommand(client *c) {
  * pointer if the instance has a valid master client, otherwise NULL
  * is returned, and the RDB saving will not persist any replication related
  * information. */
+/* 填充 rdbSaveInfo 结构体，该结构体用于在 RDB 文件中持久化复制信息。
+ * 当前该结构体明确包含来自主服务器流（master stream）的当前选定数据库，
+ * 但若 rdbSave*() 系列函数收到一个空（NULL）的 rsi 结构体指针，
+ * 则复制 ID/偏移量（Replication ID/offset）也不会被保存。
+ *
+ * 此函数填充通常由调用者在栈上分配的 'rsi'：
+ * - 如果实例存在有效的主客户端（master client），则返回填充后的指针
+ * - 否则返回 NULL，此时 RDB 保存操作将不会持久化任何与复制相关的信息。
+ */
 rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi) {
     rdbSaveInfo rsi_init;
     *rsi = rsi_init;
@@ -4041,12 +4313,23 @@ rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi) {
      * connects to us, the NULL repl_backlog will trigger a full
      * synchronization, at the same time we will use a new replid and clear
      * replid2. */
+    /* 如果实例为主节点（master），我们仅在复制积压缓冲区（repl_backlog）不为空时
+     * 才能填充复制信息。若 repl_backlog 为空，则表示该实例不在任何复制链中。
+     * 在此场景下，复制信息是无意义的，因为当副本（replica）连接到该实例时：
+     * - 空的 repl_backlog 将触发一次全量同步（full synchronization）
+     * - 同时实例会生成新的复制ID（replid）并清空 replid2
+     */
     if (g_pserver->fActiveReplica || (!listLength(g_pserver->masters) && g_pserver->repl_backlog)) {
         /* Note that when g_pserver->replicaseldb is -1, it means that this master
          * didn't apply any write commands after a full synchronization.
          * So we can let repl_stream_db be 0, this allows a restarted replica
          * to reload replication ID/offset, it's safe because the next write
          * command must generate a SELECT statement. */
+        /* 注意：当 g_pserver->replicaseldb 为 -1 时，表示该主服务器（master）在完成全量同步后
+         * 尚未执行过任何写命令。此时我们可以让 repl_stream_db 设为 0：
+         * - 允许重启的副本（replica）重新加载复制 ID/偏移量
+         * - 这种操作是安全的，因为下一个写命令必然生成 SELECT 语句（选择数据库操作）
+         */
         rsi->repl_stream_db = g_pserver->replicaseldb == -1 ? 0 : g_pserver->replicaseldb;
         return rsi;
     }
@@ -4065,6 +4348,11 @@ rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi) {
      * increment the master_repl_offset only from data arriving from the
      * master, so if we are disconnected the offset in the cached master
      * is valid. */
+    /* 若存在已缓存的主服务器（cached master），可通过它来填充 RDB 文件中的
+     * 复制选定数据库（replication selected DB）信息：
+     * - 副本（replica）只能通过来自主服务器的数据增加 master_repl_offset
+     * - 因此即使当前与主服务器断开连接，缓存主服务器中的偏移量仍然有效
+     */
     if (miFirst && miFirst->cached_master) {
         rsi->repl_stream_db = miFirst->cached_master->db->id;
         return rsi;
