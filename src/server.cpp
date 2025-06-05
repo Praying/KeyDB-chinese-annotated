@@ -3787,9 +3787,8 @@ void resetServerStats(void) {
     g_pserver->aof_delayed_fsync = 0;
 }
 
-/* Make the thread killable at any time, so that kill threads functions
- * can work reliably (default cancelability type is PTHREAD_CANCEL_DEFERRED).
- * Needed for pthread_cancel used by the fast memory test used by the crash report. */
+/* 将线程设置为随时可终止，以便终止线程的函数（如崩溃报告中使用的快速内存测试所依赖的pthread_cancel）能够可靠工作。
+ * （默认的线程可取消类型为 PTHREAD_CANCEL_DEFERRED，即延迟取消模式）*/
 void makeThreadKillable(void) {
     pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);

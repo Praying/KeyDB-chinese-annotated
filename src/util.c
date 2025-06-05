@@ -639,11 +639,11 @@ int ld2string(char *buf, size_t len, long double value, ld2string_mode mode) {
     return l;
 }
 
-/* Get random bytes, attempts to get an initial seed from /dev/urandom and
- * the uses a one way hash function in counter mode to generate a random
- * stream. However if /dev/urandom is not available, a weaker seed is used.
+/* 获取随机字节序列，首先尝试从/dev/urandom获取初始种子，
+ * 然后使用计数器模式下的单向哈希函数生成随机流。
+ * 但如果/dev/urandom不可用，则会使用较弱的种子。
  *
- * This function is not thread safe, since the state is global. */
+ * 注意：由于使用全局状态，本函数是非线程安全的。 */
 void getRandomBytes(unsigned char *p, size_t len) {
     /* Global state. */
     static int seed_initialized = 0;
@@ -708,10 +708,9 @@ void getRandomBytes(unsigned char *p, size_t len) {
     }
 }
 
-/* Generate the Redis "Run ID", a SHA1-sized random number that identifies a
- * given execution of Redis, so that if you are talking with an instance
- * having run_id == A, and you reconnect and it has run_id == B, you can be
- * sure that it is either a different instance or it was restarted. */
+/* 生成Redis的"运行ID"（Run ID），这是一个SHA1大小的随机数，用于标识Redis的某次特定运行。
+ * 这样，当你与一个run_id为A的实例通信时，如果重连后发现它的run_id变为B，
+ * 你就可以确定这是一个不同的实例，或者该实例已经重启过。 */
 void getRandomHexChars(char *p, size_t len) {
     char *charset = "0123456789abcdef";
     size_t j;

@@ -39,6 +39,7 @@
 #ifdef __linux__
 #include <sys/sysinfo.h>
 #endif
+#define ENABLE_ROCKSDB 1
 
 const char *KEYDB_SET_VERSION = KEYDB_REAL_VERSION;
 size_t g_semiOrderedSetTargetBucketSize = 0;    // Its a header only class so nowhere else for this to go
