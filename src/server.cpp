@@ -6774,10 +6774,7 @@ void removeSignalHandlers(void) {
     sigaction(SIGABRT, &act, NULL);
 }
 
-/* This is the signal handler for children process. It is currently useful
- * in order to track the SIGUSR1, that we send to a child in order to terminate
- * it in a clean way, without the parent detecting an error and stop
- * accepting writes because of a write error condition. */
+/* 这是子进程的信号处理程序。它目前用于跟踪 SIGUSR1 信号，我们发送此信号给子进程以使其干净地终止，而不会让父进程检测到错误并因写入错误条件而停止接受写入。 */
 static void sigKillChildHandler(int sig) {
     UNUSED(sig);
     int level = g_pserver->in_fork_child == CHILD_TYPE_MODULE? LL_VERBOSE: LL_WARNING;
@@ -6788,8 +6785,7 @@ static void sigKillChildHandler(int sig) {
 void setupChildSignalHandlers(void) {
     struct sigaction act;
 
-    /* When the SA_SIGINFO flag is set in sa_flags then sa_sigaction is used.
-     * Otherwise, sa_handler is used. */
+    /* 当 sa_flags 中设置了 SA_SIGINFO 标志时，将使用 sa_sigaction。否则，使用 sa_handler。 */
     sigemptyset(&act.sa_mask);
     act.sa_flags = 0;
     act.sa_handler = sigKillChildHandler;
@@ -6797,22 +6793,18 @@ void setupChildSignalHandlers(void) {
     return;
 }
 
-/* After fork, the child process will inherit the resources
- * of the parent process, e.g. fd(socket or flock) etc.
- * should close the resources not used by the child process, so that if the
- * parent restarts it can bind/lock despite the child possibly still running. */
+/* fork 之后，子进程将继承父进程的资源，例如 fd（套接字或文件锁）等。应该关闭子进程不使用的资源，这样即使子进程可能仍在运行，父进程重启时也可以进行绑定/锁定。 */
 void closeChildUnusedResourceAfterFork() {
     closeListeningSockets(0);
     if (g_pserver->cluster_enabled && g_pserver->cluster_config_file_lock_fd != -1)
-        close(g_pserver->cluster_config_file_lock_fd);  /* don't care if this fails */
+        close(g_pserver->cluster_config_file_lock_fd);  /* 不关心这是否失败 */
 
     for (int iel = 0; iel < cserver.cthreads; ++iel) {
         aeClosePipesForForkChild(g_pserver->rgthreadvar[iel].el);
     }
     aeClosePipesForForkChild(g_pserver->modulethreadvar.el);
 
-    /* Clear cserver.pidfile, this is the parent pidfile which should not
-     * be touched (or deleted) by the child (on exit / crash) */
+    /* 清除 cserver.pidfile，这是父进程的 pidfile，子进程（在退出/崩溃时）不应接触（或删除）它 */
     zfree(cserver.pidfile);
     cserver.pidfile = NULL;
 }
@@ -6825,19 +6817,19 @@ void executeWithoutGlobalLock(std::function<void()> func) {
     listNode *ln;
     listRewind(g_pserver->clients, &li);
 
-    // All client locks must be acquired *after* the global lock is reacquired to prevent deadlocks
-    //  so unlock here, and save them for reacquisition later
+    // 所有客户端锁必须在重新获取全局锁*之后*获取，以防止死锁
+    //  所以在这里解锁，并保存它们以便稍后重新获取
     while ((ln = listNext(&li)) != nullptr)
     {
         client *c = (client*)listNodeValue(ln);
         if (c->lock.fOwnLock()) {
-            serverAssert(c->flags & CLIENT_PROTECTED || c->flags & CLIENT_EXECUTING_COMMAND);  // If the client is not protected we have no gurantee they won't be free'd in the event loop
+            serverAssert(c->flags & CLIENT_PROTECTED || c->flags & CLIENT_EXECUTING_COMMAND);  // 如果客户端未受保护，我们无法保证它们不会在事件循环中被释放
             c->lock.unlock();
             vecclients.push_back(c);
         }
     }
     
-    /* Since we're about to release our lock we need to flush the repl backlog queue */
+    /* 因为我们即将释放锁，所以需要刷新复制积压队列 */
     bool fReplBacklog = g_pserver->repl_batch_offStart >= 0;
     if (fReplBacklog) {
         flushReplBacklogToClients();
@@ -6851,7 +6843,7 @@ void executeWithoutGlobalLock(std::function<void()> func) {
         func();
     }
     catch (...) {
-        // Caller expects us to be locked so fix and rethrow
+        // 调用者期望我们已锁定，因此修复并重新抛出
         AeLocker locker;
         locker.arm(nullptr);
         locker.release();
@@ -6864,7 +6856,7 @@ void executeWithoutGlobalLock(std::function<void()> func) {
     locker.arm(nullptr);
     locker.release();
 
-    // Restore it so the calling code is not confused
+    // 恢复它，以免调用代码混淆
     if (fReplBacklog) {
         g_pserver->repl_batch_idxStart = g_pserver->repl_backlog_idx;
         g_pserver->repl_batch_offStart = g_pserver->master_repl_offset;
@@ -6874,7 +6866,7 @@ void executeWithoutGlobalLock(std::function<void()> func) {
         c->lock.lock();
 }
 
-/* purpose is one of CHILD_TYPE_ types */
+/* purpose 是 CHILD_TYPE_ 类型之一 */
 int redisFork(int purpose) {
     int childpid;
     long long start = ustime();
@@ -6908,13 +6900,12 @@ int redisFork(int purpose) {
             return -1;
         }
 
-        /* The child_pid and child_type are only for mutual exclusive children.
-         * other child types should handle and store their pid's in dedicated variables.
+        /* child_pid 和 child_type 仅适用于互斥的子进程。
+         * 其他子进程类型应在专用变量中处理和存储其 PID。
          *
-         * Today, we allows CHILD_TYPE_LDB to run in parallel with the other fork types:
-         * - it isn't used for production, so it will not make the server be less efficient
-         * - used for debugging, and we don't want to block it from running while other
-         *   forks are running (like RDB and AOF) */
+         * 目前，我们允许 CHILD_TYPE_LDB 与其他 fork 类型并行运行：
+         * - 它不用于生产环境，因此不会降低服务器效率
+         * - 用于调试，我们不希望在其他 fork（如 RDB 和 AOF）运行时阻止它运行 */
         if (isMutuallyExclusiveChildType(purpose)) {
             g_pserver->child_pid = childpid;
             g_pserver->child_type = purpose;
@@ -6943,8 +6934,7 @@ void sendChildInfo(childInfoType info_type, size_t keys, const char *pname) {
 
 extern "C" void memtest(size_t megabytes, int passes);
 
-/* Returns 1 if there is --sentinel among the arguments or if
- * argv[0] contains "keydb-sentinel". */
+/* 如果参数中包含 --sentinel 或者 argv[0] 包含 "keydb-sentinel"，则返回 1。 */
 int checkForSentinelMode(int argc, char **argv) {
     int j;
 
@@ -6954,7 +6944,7 @@ int checkForSentinelMode(int argc, char **argv) {
     return 0;
 }
 
-/* Function called at startup to load RDB or AOF file in memory. */
+/* 启动时调用的函数，用于将 RDB 或 AOF 文件加载到内存中。 */
 void loadDataFromDisk(void) {
     long long start = ustime();
 
@@ -6978,20 +6968,18 @@ void loadDataFromDisk(void) {
     } else if (g_pserver->rdb_filename != NULL || g_pserver->rdb_s3bucketpath != NULL) {
         rdbSaveInfo rsi;
         rsi.fForceSetKey = false;
-        errno = 0; /* Prevent a stale value from affecting error checking */
+        errno = 0; /* 防止过时的值影响错误检查 */
         if (rdbLoad(&rsi,RDBFLAGS_NONE) == C_OK) {
             serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
                 (float)(ustime()-start)/1000000);
 
-            /* Restore the replication ID / offset from the RDB file. */
-            if ((listLength(g_pserver->masters) || 
-                (g_pserver->cluster_enabled && 
+            /* 从 RDB 文件中恢复复制 ID / 偏移量。 */
+            if ((listLength(g_pserver->masters) ||
+                (g_pserver->cluster_enabled &&
                 nodeIsSlave(g_pserver->cluster->myself))) &&
                 rsi.repl_id_is_set &&
                 rsi.repl_offset != -1 &&
-                /* Note that older implementations may save a repl_stream_db
-                 * of -1 inside the RDB file in a wrong way, see more
-                 * information in function rdbPopulateSaveInfo. */
+                /* 注意，较旧的实现可能会以错误的方式在 RDB 文件中保存 -1 的 repl_stream_db，更多信息请参见函数 rdbPopulateSaveInfo。 */
                 rsi.repl_stream_db != -1)
             {
                 memcpy(g_pserver->replid,rsi.repl_id,sizeof(g_pserver->replid));
@@ -7002,9 +6990,7 @@ void loadDataFromDisk(void) {
             updateActiveReplicaMastersFromRsi(&rsi);
             if (!g_pserver->fActiveReplica && listLength(g_pserver->masters)) {
                 redisMaster *mi = (redisMaster*)listNodeValue(listFirst(g_pserver->masters));
-                /* If we are a replica, create a cached master from this
-                * information, in order to allow partial resynchronizations
-                * with masters. */
+                /* 如果我们是从库，则根据此信息创建一个缓存的主库，以便允许与主库进行部分重新同步。 */
                 replicationCacheMasterUsingMyself(mi);
                 selectDb(mi->cached_master,rsi.repl_stream_db);
             }
@@ -7024,8 +7010,7 @@ void redisOutOfMemoryHandler(size_t allocation_size) {
         allocation_size);
 }
 
-/* Callback for sdstemplate on proc-title-template. See redis.conf for
- * supported variables.
+/* proc-title-template 上 sdstemplate 的回调函数。有关支持的变量，请参见 redis.conf。
  */
 static sds redisProcTitleGetVariable(const sds varname, void *arg)
 {
@@ -7051,18 +7036,17 @@ static sds redisProcTitleGetVariable(const sds varname, void *arg)
     } else if (!strcmp(varname, "unixsocket")) {
         return sdsnew(g_pserver->unixsocket);
     } else
-        return NULL;    /* Unknown variable name */
+        return NULL;    /* 未知的变量名 */
 }
 
-/* Expand the specified proc-title-template string and return a newly
- * allocated sds, or NULL. */
+/* 展开指定的 proc-title-template 字符串并返回新分配的 sds，或返回 NULL。 */
 static sds expandProcTitleTemplate(const char *_template, const char *title) {
     sds res = sdstemplate(_template, redisProcTitleGetVariable, (void *) title);
     if (!res)
         return NULL;
     return sdstrim(res, " ");
 }
-/* Validate the specified template, returns 1 if valid or 0 otherwise. */
+/* 验证指定的模板，如果有效则返回 1，否则返回 0。 */
 int validateProcTitleTemplate(const char *_template) {
     int ok = 1;
     sds res = expandProcTitleTemplate(_template, "");
@@ -7466,7 +7450,7 @@ int main(int argc, char **argv) {
                 redisTests[j].failed = (redisTests[j].proc(argc,argv,accurate) != 0);
             }
 
-            /* Report tests result */
+            /* 报告测试结果 */
             int failed_num = 0;
             for (j = 0; j < numtests; j++) {
                 if (redisTests[j].failed) {
@@ -7483,7 +7467,7 @@ int main(int argc, char **argv) {
             return failed_num == 0 ? 0 : 1;
         } else {
             redisTestProc *proc = getTestProcByName(argv[2]);
-            if (!proc) return -1; /* test not found */
+            if (!proc) return -1; /* 未找到测试 */
             return proc(argc,argv,accurate);
         }
 
@@ -7491,12 +7475,12 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    /* We need to initialize our libraries, and the server configuration. */
+    /* 我们需要初始化我们的库和服务器配置。 */
 #ifdef INIT_SETPROCTITLE_REPLACEMENT
     spt_init(argc, argv);
 #endif
     setlocale(LC_COLLATE,"");
-    tzset(); /* Populates 'timezone' global. */
+    tzset(); /* 填充 'timezone' 全局变量。 */
     zmalloc_set_oom_handler(redisOutOfMemoryHandler);
     srand(time(NULL)^getpid());
     srandom(time(NULL)^getpid());
@@ -7504,9 +7488,7 @@ int main(int argc, char **argv) {
     init_genrand64(((long long) tv.tv_sec * 1000000 + tv.tv_usec) ^ getpid());
     crc64_init();
 
-    /* Store umask value. Because umask(2) only offers a set-and-get API we have
-     * to reset it and restore it back. We do this early to avoid a potential
-     * race condition with threads that could be creating files or directories.
+    /* 存储 umask 值。因为 umask(2) 只提供设置和获取 API，所以我们必须重置它并恢复它。我们尽早执行此操作以避免与可能正在创建文件或目录的线程发生潜在的竞争条件。
      */
     umask(g_pserver->umask = umask(0777));
     
@@ -7519,40 +7501,34 @@ int main(int argc, char **argv) {
     initServerConfig();
     serverTL = &g_pserver->rgthreadvar[IDX_EVENT_LOOP_MAIN];
     aeThreadOnline();
-    aeAcquireLock();    // We own the lock on boot
-    ACLInit(); /* The ACL subsystem must be initialized ASAP because the
-                  basic networking code and client creation depends on it. */
+    aeAcquireLock();    // 我们在启动时拥有锁
+    ACLInit(); /* ACL 子系统必须尽快初始化，因为基础网络代码和客户端创建依赖于它。 */
     moduleInitModulesSystem();
     tlsInit();
 
-    /* Store the executable path and arguments in a safe place in order
-     * to be able to restart the server later. */
+    /* 将可执行文件路径和参数存储在安全的地方，以便以后能够重新启动服务器。 */
     cserver.executable = getAbsolutePath(argv[0]);
     cserver.exec_argv = (char**)zmalloc(sizeof(char*)*(argc+1), MALLOC_LOCAL);
     cserver.exec_argv[argc] = NULL;
     for (j = 0; j < argc; j++) cserver.exec_argv[j] = zstrdup(argv[j]);
 
-    /* We need to init sentinel right now as parsing the configuration file
-     * in sentinel mode will have the effect of populating the sentinel
-     * data structures with master nodes to monitor. */
+    /* 我们现在需要初始化 sentinel，因为在 sentinel 模式下解析配置文件会将 sentinel 数据结构填充到要监视的主节点中。 */
     if (g_pserver->sentinel_mode) {
         initSentinelConfig();
         initSentinel();
     }
 
-    /* Check if we need to start in keydb-check-rdb/aof mode. We just execute
-     * the program main. However the program is part of the Redis executable
-     * so that we can easily execute an RDB check on loading errors. */
+    /* 检查我们是否需要在 keydb-check-rdb/aof 模式下启动。我们只执行程序 main。但是，该程序是 Redis 可执行文件的一部分，因此我们可以轻松地在加载错误时执行 RDB 检查。 */
     if (strstr(argv[0],"keydb-check-rdb") != NULL)
         redis_check_rdb_main(argc,(const char**)argv,NULL);
     else if (strstr(argv[0],"keydb-check-aof") != NULL)
         redis_check_aof_main(argc,argv);
 
     if (argc >= 2) {
-        j = 1; /* First option to parse in argv[] */
+        j = 1; /* argv[] 中要解析的第一个选项 */
         sds options = sdsempty();
 
-        /* Handle special options --help and --version */
+        /* 处理特殊选项 --help 和 --version */
         if (strcmp(argv[1], "-v") == 0 ||
             strcmp(argv[1], "--version") == 0) version();
         if (strcmp(argv[1], "--help") == 0 ||
@@ -7567,33 +7543,30 @@ int main(int argc, char **argv) {
                 exit(1);
             }
         }
-        /* Parse command line options
-         * Precedence wise, File, stdin, explicit options -- last config is the one that matters.
+        /* 解析命令行选项
+         * 优先顺序：文件、标准输入、显式选项——最后一个配置才是重要的。
          *
-         * First argument is the config file name? */
+         * 第一个参数是配置文件名吗？ */
         if (argv[1][0] != '-') {
-            /* Replace the config file in g_pserver->exec_argv with its absolute path. */
+            /* 将 g_pserver->exec_argv 中的配置文件替换为其绝对路径。 */
             cserver.configfile = getAbsolutePath(argv[1]);
             zfree(cserver.exec_argv[1]);
             cserver.exec_argv[1] = zstrdup(cserver.configfile);
-            j = 2; // Skip this arg when parsing options
+            j = 2; // 解析选项时跳过此参数
         }
         while(j < argc) {
-            /* Either first or last argument - Should we read config from stdin? */
+            /* 第一个或最后一个参数——我们应该从 stdin 读取配置吗？ */
             if (argv[j][0] == '-' && argv[j][1] == '\0' && (j == 1 || j == argc-1)) {
                 config_from_stdin = 1;
             }
-            /* All the other options are parsed and conceptually appended to the
-             * configuration file. For instance --port 6380 will generate the
-             * string "port 6380\n" to be parsed after the actual config file
-             * and stdin input are parsed (if they exist). */
+            /* 所有其他选项都会被解析并概念上附加到配置文件中。例如 --port 6380 将生成字符串 "port 6380\n"，以便在解析实际配置文件和 stdin 输入（如果存在）之后进行解析。 */
             else if (argv[j][0] == '-' && argv[j][1] == '-') {
-                /* Option name */
+                /* 选项名称 */
                 if (sdslen(options)) options = sdscat(options,"\n");
                 options = sdscat(options,argv[j]+2);
                 options = sdscat(options," ");
             } else {
-                /* Option argument */
+                /* 选项参数 */
                 options = sdscatrepr(options,argv[j],strlen(argv[j]));
                 options = sdscat(options," ");
             }
@@ -7636,7 +7609,7 @@ int main(int argc, char **argv) {
     if (!g_pserver->sentinel_mode) {
     #ifdef __linux__
         linuxMemoryWarnings();
-    #if defined (__arm64__)
+    #if defined (__arm64__) // 如果定义了 __arm64__
         int ret;
         if ((ret = linuxMadvFreeForkBugCheck())) {
             if (ret == 1)
@@ -7651,8 +7624,8 @@ int main(int argc, char **argv) {
                 exit(1);
             }
         }
-    #endif /* __arm64__ */
-    #endif /* __linux__ */
+    #endif /* __arm64__ */ // 结束 __arm64__ 条件编译
+    #endif /* __linux__ */ // 结束 __linux__ 条件编译
     }
 
 
@@ -7665,13 +7638,13 @@ int main(int argc, char **argv) {
 
     for (int iel = 0; iel < cserver.cthreads; ++iel)
     {
-        initServerThread(g_pserver->rgthreadvar+iel, iel == IDX_EVENT_LOOP_MAIN);
+        initServerThread(g_pserver->rgthreadvar+iel, iel == IDX_EVENT_LOOP_MAIN); // 初始化服务器线程，主事件循环线程特殊处理
     }
 
     initServerThread(&g_pserver->modulethreadvar, false);
     readOOMScoreAdj();
     initServer();
-    initNetworking(cserver.cthreads > 1 /* fReusePort */);
+    initNetworking(cserver.cthreads > 1 /* fReusePort */); // 初始化网络，如果线程数大于1，则 fReusePort 为 true
 
     if (background || cserver.pidfile) createPidFile();
     if (cserver.set_proc_title) redisSetProcTitle(NULL);
@@ -7679,13 +7652,13 @@ int main(int argc, char **argv) {
     checkTcpBacklogSettings();
 
     if (!g_pserver->sentinel_mode) {
-        /* Things not needed when running in Sentinel mode. */
+        /* 在 Sentinel 模式下运行时不需要的东西。 */
         serverLog(LL_WARNING,"Server initialized");
         moduleInitModulesSystemLast();
         moduleLoadFromQueue();
         ACLLoadUsersAtStartup();
 
-        // special case of FUZZING load from stdin then quit
+        // FUZZING 的特殊情况：从 stdin 加载然后退出
         if (argc > 1 && strstr(argv[1],"rdbfuzz-mode") != NULL)
         {
             zmalloc_set_oom_handler(fuzzOutOfMemoryHandler);
@@ -7757,7 +7730,7 @@ int main(int argc, char **argv) {
     }
 
     redisSetCpuAffinity(g_pserver->server_cpulist);
-    aeReleaseLock();    //Finally we can dump the lock
+    aeReleaseLock();    //最终我们可以释放锁
     aeThreadOffline();
     moduleReleaseGIL(true);
     
@@ -7793,23 +7766,23 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Block SIGALRM from this thread, it should only be received on a server thread */
+    /* 阻止此线程接收 SIGALRM 信号，它应该只在服务器线程上接收 */
     sigset_t sigset;
     sigemptyset(&sigset);
     sigaddset(&sigset, SIGALRM);
     pthread_sigmask(SIG_BLOCK, &sigset, nullptr);
 
-    /* The main thread sleeps until all the workers are done.
-        this is so that all worker threads are orthogonal in their startup/shutdown */
+    /* 主线程休眠直到所有工作线程完成。
+        这样可以使所有工作线程在其启动/关闭过程中保持正交 */
     void *pvRet;
     for (int iel = 0; iel < cserver.cthreads; ++iel)
         pthread_join(g_pserver->rgthread[iel], &pvRet);
 
-    /* free our databases */
+    /* 释放我们的数据库 */
     bool fLockAcquired = aeTryAcquireLock(false);
-    g_pserver->shutdown_asap = true;    // flag that we're in shutdown
+    g_pserver->shutdown_asap = true;    // 标记我们处于关闭状态
     if (!fLockAcquired)
-        g_fInCrash = true;  // We don't actually crash right away, because we want to sync any storage providers
+        g_fInCrash = true;  // 我们实际上不会立即崩溃，因为我们想同步任何存储提供程序
     
     saveMasterStatusToStorage(true);
     for (int idb = 0; idb < cserver.dbnum; ++idb) {
@@ -7817,15 +7790,15 @@ int main(int argc, char **argv) {
     }
     delete g_pserver->metadataDb;
 
-    // If we couldn't acquire the global lock it means something wasn't shutdown and we'll probably deadlock
+    // 如果我们无法获取全局锁，这意味着某些东西没有关闭，我们很可能会死锁
     serverAssert(fLockAcquired);
 
     g_pserver->garbageCollector.shutdown();
     delete g_pserver->m_pstorageFactory;
 
-    // Don't return because we don't want to run any global dtors
+    // 不要返回，因为我们不想运行任何全局析构函数
     _Exit(EXIT_SUCCESS);
-    return 0;   // Ensure we're well formed even though this won't get hit
+    return 0;   // 确保我们格式良好，即使这不会被执行
 }
 
 /* The End */
