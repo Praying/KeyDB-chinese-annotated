@@ -3083,45 +3083,43 @@ struct redisServer {
     uint64_t mvcc_tstamp;
 
     AsyncWorkQueue *asyncworkqueue;
+    /* 系统硬件信息 */
+    size_t system_memory_size;  /* 操作系统报告的系统总内存大小 */
 
-    /* System hardware info */
-    size_t system_memory_size;  /* Total memory in system as reported by OS */
+    GarbageCollectorCollection garbageCollector;  // 垃圾回收器集合
 
-    GarbageCollectorCollection garbageCollector;
+    IStorageFactory *m_pstorageFactory = nullptr; // 存储工厂接口指针
+    int storage_flush_period;   // CRON作业中执行存储刷新的时间间隔
 
-    IStorageFactory *m_pstorageFactory = nullptr;
-    int storage_flush_period;   // The time between flushes in the CRON job
+    long long snapshot_slip = 500;   // 允许快照落后当前数据库的时间量（毫秒）
 
-    long long snapshot_slip = 500;   // The amount of time in milliseconds we let a snapshot be behind the current database
+    /* TLS 配置参数 */
+    int tls_cluster;            // 集群通信TLS启用标志
+    int tls_replication;        // 复制连接TLS启用标志
+    int tls_auth_clients;       // 客户端认证TLS启用标志
+    int tls_rotation;           // TLS证书轮换策略
 
-    /* TLS Configuration */
-    int tls_cluster;
-    int tls_replication;
-    int tls_auth_clients;
-    int tls_rotation;
+    std::set<sdsstring> tls_auditlog_blocklist; /* 可从审计日志中排除的证书列表 */
+    std::set<sdsstring> tls_allowlist;          // TLS允许列表
+    redisTLSContextConfig tls_ctx_config;       // TLS上下文配置
 
-    std::set<sdsstring> tls_auditlog_blocklist; /* Certificates that can be excluded from audit logging */
-    std::set<sdsstring> tls_allowlist;
-    redisTLSContextConfig tls_ctx_config;
+    /* CPU 亲和性设置 */
+    char *server_cpulist; /* Redis服务器主线程/I/O线程的CPU亲和性列表 */
+    char *bio_cpulist;    /* 后台I/O(bio)线程的CPU亲和性列表 */
+    char *aof_rewrite_cpulist; /* AOF重写进程的CPU亲和性列表 */
+    char *bgsave_cpulist;      /* 后台保存(bgsave)进程的CPU亲和性列表 */
 
-    /* cpu affinity */
-    char *server_cpulist; /* cpu affinity list of redis server main/io thread. */
-    char *bio_cpulist; /* cpu affinity list of bio thread. */
-    char *aof_rewrite_cpulist; /* cpu affinity list of aof rewrite process. */
-    char *bgsave_cpulist; /* cpu affinity list of bgsave process. */
-
-    int prefetch_enabled = 1;
-    /* Sentinel config */
-    struct sentinelConfig *sentinel_config; /* sentinel config to load at startup time. */
-    /* Coordinate failover info */
-    mstime_t failover_end_time; /* Deadline for failover command. */
-    int force_failover; /* If true then failover will be foreced at the
-                         * deadline, otherwise failover is aborted. */
-    char *target_replica_host; /* Failover target host. If null during a
-                                * failover then any replica can be used. */
-    int target_replica_port; /* Failover target port */
-    int failover_state; /* Failover state */
-
+    int prefetch_enabled = 1;    // 预取功能启用标志
+    /* Sentinel (哨兵) 配置 */
+    struct sentinelConfig *sentinel_config; /* 启动时加载的哨兵配置 */
+    /* 故障转移协调信息 */
+    mstime_t failover_end_time; /* 故障转移命令执行的截止时间 */
+    int force_failover; /* 如果为true，则在截止时间强制执行故障转移；
+                         * 否则将中止故障转移 */
+    char *target_replica_host; /* 故障转移目标主机。在故障转移过程中如果为null，
+                                * 则可以使用任意副本 */
+    int target_replica_port;   /* 故障转移目标端口 */
+    int failover_state;        /* 当前故障转移状态 */
     int enable_async_commands;
     int multithread_load_enabled = 0;
     int active_client_balancing = 1;
@@ -3164,16 +3162,17 @@ inline int redisServerThreadVars::getRdbKeySaveDelay() {
 
 #define MAX_KEYS_BUFFER 256
 
-/* A result structure for the various getkeys function calls. It lists the
- * keys as indices to the provided argv.
+/*
+ * 用于多个getkeys函数调用的返回结果结构体。
+ * 该结构体将键（keys）表示为所提供argv参数的索引列表。
  */
 typedef struct {
-    int keysbuf[MAX_KEYS_BUFFER];       /* Pre-allocated buffer, to save heap allocations */
-    int *keys;                          /* Key indices array, points to keysbuf or heap */
-    int numkeys;                        /* Number of key indices return */
-    int size;                           /* Available array size */
+    int keysbuf[MAX_KEYS_BUFFER];       /* 预分配缓冲区，用于避免堆内存分配 */
+    int *keys;                          /* 键索引数组，指向keysbuf或堆内存 */
+    int numkeys;                        /* 返回的键索引数量 */
+    int size;                           /* 当前可用数组容量 */
 } getKeysResult;
-#define GETKEYS_RESULT_INIT { {0}, NULL, 0, MAX_KEYS_BUFFER }
+#define GETKEYS_RESULT_INIT { {0}, NULL, 0, MAX_KEYS_BUFFER }  // 结构体初始化宏
 
 typedef void redisCommandProc(client *c);
 typedef int redisGetKeysProc(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
@@ -3218,32 +3217,31 @@ typedef struct _redisSortOperation {
     robj *pattern;
 } redisSortOperation;
 
-/* Structure to hold list iteration abstraction. */
+/* 用于列表迭代的抽象结构 */
 typedef struct {
     robj_roptr subject;
     unsigned char encoding;
-    unsigned char direction; /* Iteration direction */
+    unsigned char direction; /* 迭代方向 */
     quicklistIter *iter;
 } listTypeIterator;
 
-/* Structure for an entry while iterating over a list. */
+/* 用于在列表迭代过程中表示单个条目的结构 */
 typedef struct {
     listTypeIterator *li;
-    quicklistEntry entry; /* Entry in quicklist */
+    quicklistEntry entry; /* quicklist中的条目 */
 } listTypeEntry;
 
-/* Structure to hold set iteration abstraction. */
+/* 用于集合(set)迭代的抽象结构 */
 typedef struct {
     robj_roptr subject;
     int encoding;
-    int ii; /* intset iterator */
+    int ii; /* intset迭代器 */
     dictIterator *di;
 } setTypeIterator;
 
-/* Structure to hold hash iteration abstraction. Note that iteration over
- * hashes involves both fields and values. Because it is possible that
- * not both are required, store pointers in the iterator to avoid
- * unnecessary memory allocation for fields/values. */
+/* 用于哈希(hash)迭代的抽象结构。注意哈希迭代
+ * 涉及字段(field)和值(value)。由于可能不需要同时获取两者，
+ * 迭代器中存储指针以避免不必要的字段/值内存分配 */
 typedef struct {
     robj_roptr subject;
     int encoding;
@@ -3254,15 +3252,15 @@ typedef struct {
     dictEntry *de;
 } hashTypeIterator;
 
-#include "stream.h"  /* Stream data type header file. */
+#include "stream.h"  /* 流数据类型的头文件 */
 
 #define OBJ_HASH_KEY 1
 #define OBJ_HASH_VALUE 2
 
-/* Used in evict.cpp */
+/* 在evict.cpp中使用 */
 enum class EvictReason {
-    User,       /* User memory exceeded limit */
-    System      /* System memory exceeded limit */
+    User,       /* 用户内存超过限制 */
+    System      /* 系统内存超过限制 */
 };
 
 /*-----------------------------------------------------------------------------
@@ -4375,8 +4373,8 @@ void flushReplBacklogToClients();
 
 template<typename FN_PTR, class ...TARGS>
 void runAndPropogateToReplicas(FN_PTR *pfn, TARGS... args) {
-    // Store the replication backlog starting params, we use this to know how much data was written.
-    //  these are TLS in case we need to expand the buffer and therefore need to update them
+    // 存储复制积压缓冲区(replication backlog)的起始参数，用于计算写入的数据量
+    // 这些是TLS(线程本地存储)变量，因为当需要扩展缓冲区时需要更新它们
     bool fNestedProcess = (g_pserver->repl_batch_idxStart >= 0);
     if (!fNestedProcess) {
         g_pserver->repl_batch_offStart = g_pserver->master_repl_offset;
@@ -4397,20 +4395,19 @@ void killIOThreads(void);
 void killThreads(void);
 void makeThreadKillable(void);
 
-/* Use macro for checking log level to avoid evaluating arguments in cases log
- * should be ignored due to low level. */
+/* 使用宏检查日志级别，避免在因级别过低需要忽略日志时计算参数 */
 #define serverLog(level, ...) do {\
         if (((level)&0xff) < cserver.verbosity) break;\
         _serverLog(level, __VA_ARGS__);\
     } while(0)
 
-/* TLS stuff */
-void tlsInit(void);
-void tlsInitThread();
-void tlsCleanupThread();
-void tlsCleanup(void);
-int tlsConfigure(redisTLSContextConfig *ctx_config);
-void tlsReload(void);
+/* TLS (传输层安全)相关函数 */
+void tlsInit(void);                      // 初始化TLS系统
+void tlsInitThread();                    // 初始化线程级TLS
+void tlsCleanupThread();                 // 清理线程级TLS
+void tlsCleanup(void);                   // 清理TLS系统
+int tlsConfigure(redisTLSContextConfig *ctx_config); // 配置TLS上下文
+void tlsReload(void);                    // 重新加载TLS配置                // 重新加载TLS配置
 
 
 class ShutdownException

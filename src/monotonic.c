@@ -36,6 +36,17 @@ static monotime getMonotonicUs_x86() {
     return __rdtsc() / mono_ticksPerMicrosecond;
 }
 
+/**
+ * 初始化x86 Linux平台的单调时钟支持。
+ * 该函数通过解析/proc/cpuinfo获取处理器基准频率，并验证TSC寄存器特性，
+ * 为后续使用x86时间戳计数器提供配置依据。
+ *
+ * 参数：
+ *   无
+ *
+ * 返回值：
+ *   无。初始化失败时会输出错误信息到标准错误流。
+ */
 static void monotonicInit_x86linux() {
     const int bufflen = 256;
     char buf[bufflen];
@@ -45,20 +56,19 @@ static void monotonicInit_x86linux() {
     int constantTsc = 0;
     int rc;
 
-    /* Determine the number of TSC ticks in a micro-second.  This is
-     * a constant value matching the standard speed of the processor.
-     * On modern processors, this speed remains constant even though
-     * the actual clock speed varies dynamically for each core.  */
+    /* 编译正则表达式：匹配CPU主频信息
+     * 用于从/proc/cpuinfo中提取类似"model name: ... @ X.XGHz"的频率信息 */
     rc = regcomp(&cpuGhzRegex, "^model name\\s+:.*@ ([0-9.]+)GHz", REG_EXTENDED);
     assert(rc == 0);
 
-    /* Also check that the constant_tsc flag is present.  (It should be
-     * unless this is a really old CPU.  */
+    /* 编译正则表达式：检查constant_tsc标志
+     * 用于验证CPU是否支持恒定TSC频率（不受P状态影响） */
     rc = regcomp(&constTscRegex, "^flags\\s+:.* constant_tsc", REG_EXTENDED);
     assert(rc == 0);
 
     FILE *cpuinfo = fopen("/proc/cpuinfo", "r");
     if (cpuinfo != NULL) {
+        /* 解析/proc/cpuinfo获取基准频率 */
         while (fgets(buf, bufflen, cpuinfo) != NULL) {
             if (regexec(&cpuGhzRegex, buf, nmatch, pmatch, 0) == 0) {
                 buf[pmatch[1].rm_eo] = '\0';
@@ -67,6 +77,8 @@ static void monotonicInit_x86linux() {
                 break;
             }
         }
+
+        /* 检查constant_tsc标志是否存在 */
         while (fgets(buf, bufflen, cpuinfo) != NULL) {
             if (regexec(&constTscRegex, buf, nmatch, pmatch, 0) == 0) {
                 constantTsc = 1;
@@ -76,9 +88,12 @@ static void monotonicInit_x86linux() {
 
         fclose(cpuinfo);
     }
+
+    /* 释放正则表达式资源 */
     regfree(&cpuGhzRegex);
     regfree(&constTscRegex);
 
+    /* 验证关键参数是否成功获取 */
     if (mono_ticksPerMicrosecond == 0) {
         fprintf(stderr, "monotonic: x86 linux, unable to determine clock rate");
         return;
@@ -88,10 +103,12 @@ static void monotonicInit_x86linux() {
         return;
     }
 
+    /* 配置全局状态信息并绑定实现函数 */
     snprintf(monotonic_info_string, sizeof(monotonic_info_string),
             "X86 TSC @ %ld ticks/us", mono_ticksPerMicrosecond);
     getMonotonicUs = getMonotonicUs_x86;
 }
+
 #endif
 
 
