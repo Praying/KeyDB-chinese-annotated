@@ -2260,10 +2260,9 @@ void saveMasterStatusToStorage(bool fShutdown)
     sdsfree(val);
 }
 
-/* Change the current instance replication ID with a new, random one.
- * This will prevent successful PSYNCs between this master and other
- * slaves, so the command should be called when something happens that
- * alters the current story of the dataset. */
+/* 生成一个全新的随机值来替换当前实例的副本标识（replication ID）。
+ * 此操作将导致当前主节点与其他从节点之间的部分同步（PSYNC）失效，
+ * 因此，当数据集发生实质性变更（破坏连续性）时，应调用此命令。*/
 void changeReplicationId(void) {
     getRandomHexChars(g_pserver->replid,CONFIG_RUN_ID_SIZE);
     g_pserver->replid[CONFIG_RUN_ID_SIZE] = '\0';
