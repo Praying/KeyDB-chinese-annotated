@@ -5304,10 +5304,9 @@ int writeCommandsDeniedByDiskError(void) {
     return DISK_ERROR_TYPE_NONE;
 }
 
-/* The PING command. It works in a different way if the client is in
- * in Pub/Sub mode. */
+/* PING 命令。如果客户端处于发布/订阅模式，则其工作方式有所不同。 */
 void pingCommand(client *c) {
-    /* The command takes zero or one arguments. */
+    /* 该命令接受零个或一个参数。 */
     if (c->argc > 2) {
         addReplyErrorFormat(c,"wrong number of arguments for '%s' command",
             c->cmd->name);
@@ -5341,15 +5340,14 @@ void echoCommand(client *c) {
 void timeCommand(client *c) {
     struct timeval tv;
 
-    /* gettimeofday() can only fail if &tv is a bad address so we
-     * don't check for errors. */
+    /* gettimeofday() 仅当 &tv 是无效地址时才会失败，因此我们不检查错误。 */
     gettimeofday(&tv,NULL);
     addReplyArrayLen(c,2);
     addReplyBulkLongLong(c,tv.tv_sec);
     addReplyBulkLongLong(c,tv.tv_usec);
 }
 
-/* Helper function for addReplyCommand() to output flags. */
+/* addReplyCommand() 的辅助函数，用于输出标志。 */
 int addReplyCommandFlag(client *c, struct redisCommand *cmd, int f, const char *reply) {
     if (cmd->flags & f) {
         addReplyStatus(c, reply);
@@ -5358,7 +5356,7 @@ int addReplyCommandFlag(client *c, struct redisCommand *cmd, int f, const char *
     return 0;
 }
 
-/* Output the representation of a Redis command. Used by the COMMAND command. */
+/* 输出 Redis 命令的表示形式。由 COMMAND 命令使用。 */
 void addReplyCommand(client *c, struct redisCommand *cmd) {
     if (!cmd) {
         addReplyNull(c);
@@ -5666,27 +5664,30 @@ sds genRedisInfoString(const char *section) {
          * may happen that the instantaneous value is slightly bigger than
          * the peak value. This may confuse users, so we update the peak
          * if found smaller than the current memory usage. */
-        if (zmalloc_used > g_pserver->stat_peak_memory)
-            g_pserver->stat_peak_memory = zmalloc_used;
+        /* 峰值内存会由 serverCron() 定期更新，因此瞬时值可能略大于
+         * 峰值。这可能会让用户感到困惑，所以如果发现峰值
+         * 小于当前内存使用量，我们会更新峰值。 */
+        if (zmalloc_used > g_pserver->stat_peak_memory) // 如果当前已分配内存大于记录的峰值内存
+            g_pserver->stat_peak_memory = zmalloc_used; // 更新峰值内存为当前已分配内存
 
-        if (g_pserver->cron_malloc_stats.sys_available) {
-            snprintf(available_system_mem, 64, "%lu", g_pserver->cron_malloc_stats.sys_available);
+        if (g_pserver->cron_malloc_stats.sys_available) { // 如果系统可用内存信息存在 (cron_malloc_stats.sys_available 非零)
+            snprintf(available_system_mem, 64, "%lu", g_pserver->cron_malloc_stats.sys_available); // 将系统可用内存格式化为字符串
         }
 
-        bytesToHuman(hmem,zmalloc_used,sizeof(hmem));
-        bytesToHuman(peak_hmem,g_pserver->stat_peak_memory,sizeof(peak_hmem));
-        bytesToHuman(total_system_hmem,total_system_mem,sizeof(total_system_hmem));
-        bytesToHuman(used_memory_lua_hmem,memory_lua,sizeof(used_memory_lua_hmem));
-        bytesToHuman(used_memory_scripts_hmem,mh->lua_caches,sizeof(used_memory_scripts_hmem));
-        bytesToHuman(used_memory_rss_hmem,g_pserver->cron_malloc_stats.process_rss,sizeof(used_memory_rss_hmem));
-        bytesToHuman(maxmemory_hmem,g_pserver->maxmemory,sizeof(maxmemory_hmem));
+        bytesToHuman(hmem,zmalloc_used,sizeof(hmem)); // 将已用内存大小 (zmalloc_used) 转换为人类可读格式 (存入 hmem)
+        bytesToHuman(peak_hmem,g_pserver->stat_peak_memory,sizeof(peak_hmem)); // 将峰值内存大小 (g_pserver->stat_peak_memory) 转换为人类可读格式 (存入 peak_hmem)
+        bytesToHuman(total_system_hmem,total_system_mem,sizeof(total_system_hmem)); // 将系统总内存大小 (total_system_mem) 转换为人类可读格式 (存入 total_system_hmem)
+        bytesToHuman(used_memory_lua_hmem,memory_lua,sizeof(used_memory_lua_hmem)); // 将 Lua 使用的内存大小 (memory_lua) 转换为人类可读格式 (存入 used_memory_lua_hmem)
+        bytesToHuman(used_memory_scripts_hmem,mh->lua_caches,sizeof(used_memory_scripts_hmem)); // 将 Lua 脚本缓存使用的内存大小 (mh->lua_caches) 转换为人类可读格式 (存入 used_memory_scripts_hmem)
+        bytesToHuman(used_memory_rss_hmem,g_pserver->cron_malloc_stats.process_rss,sizeof(used_memory_rss_hmem)); // 将进程 RSS 内存大小 (g_pserver->cron_malloc_stats.process_rss) 转换为人类可读格式 (存入 used_memory_rss_hmem)
+        bytesToHuman(maxmemory_hmem,g_pserver->maxmemory,sizeof(maxmemory_hmem)); // 将最大内存限制 (g_pserver->maxmemory) 转换为人类可读格式 (存入 maxmemory_hmem)
 
-        if (sections++) info = sdscat(info,"\r\n");
-        info = sdscatprintf(info,
-            "# Memory\r\n"
-            "used_memory:%zu\r\n"
-            "used_memory_human:%s\r\n"
-            "used_memory_rss:%zu\r\n"
+        if (sections++) info = sdscat(info,"\r\n"); // 如果 sections 非零 (表示之前已有其他信息段)，则在 info 字符串后追加换行符
+        info = sdscatprintf(info, // 将格式化后的内存信息追加到 info 字符串
+            "# Memory\r\n" // 内存信息段的标题
+            "used_memory:%zu\r\n" // 已用内存 (字节)
+            "used_memory_human:%s\r\n" // 已用内存 (人类可读格式)
+            "used_memory_rss:%zu\r\n" // 进程 RSS 内存 (字节)
             "used_memory_rss_human:%s\r\n"
             "used_memory_peak:%zu\r\n"
             "used_memory_peak_human:%s\r\n"
